@@ -87,6 +87,107 @@ def get_global_entropy_top_mask(entropy, response_mask, top_ratio=0.2):
     return flat_out.view_as(entropy)  
 
 
+def get_step_entropy_top_mask(
+    entropy: torch.Tensor,
+    response_mask: torch.Tensor,
+    response_ids: torch.Tensor,
+    boundary_lookup: torch.Tensor,
+    token_top_ratio: float = 0.2,
+    step_top_ratio: float = 0.1,
+) -> torch.Tensor:
+    """
+    Step Forking DAPO: select top high-entropy *steps* (sentences) instead of individual tokens.
+
+    For each sample in the batch:
+    1. Segment the response into steps using pre-computed boundary token IDs
+       (tokens whose decoded text contains '\\n' or ends with '.', '?', '!', etc.)
+    2. Score each step: sum of entropies of the top `token_top_ratio` high-entropy tokens within that step.
+    3. Select the top `step_top_ratio` fraction of steps.
+    4. Build a mask covering ALL tokens in the selected steps.
+
+    Args:
+        entropy: [B, S] tensor of per-token entropies.
+        response_mask: [B, S] tensor (1 = response token, 0 = pad/prompt).
+        response_ids: [B, S] tensor of token IDs for the response.
+        boundary_lookup: [vocab_size] boolean tensor. True = this token ID marks a step boundary.
+        token_top_ratio: fraction of high-entropy tokens within each step for scoring (e.g. 0.2).
+        step_top_ratio: fraction of top steps to select (e.g. 0.1 = top 10%).
+
+    Returns:
+        step_mask: [B, S] binary mask (1 = token is in a selected step, dtype=torch.long).
+    """
+    B, S = entropy.shape
+    device = entropy.device
+    result_mask = torch.zeros(B, S, dtype=torch.long, device=device)
+
+    # Ensure boundary_lookup is on the correct device and large enough
+    boundary_lookup = boundary_lookup.to(device)
+    lookup_size = boundary_lookup.shape[0]
+
+    for b in range(B):
+        valid = response_mask[b].bool()
+        if not valid.any():
+            continue
+
+        ids = response_ids[b]  # [S]
+        # Safe indexing: clamp IDs to lookup range
+        ids_safe = ids.clamp(0, lookup_size - 1)
+        is_boundary = boundary_lookup[ids_safe] & valid  # [S]
+
+        # Find valid response range
+        valid_positions = valid.nonzero(as_tuple=False).squeeze(1)
+        if valid_positions.numel() == 0:
+            continue
+        resp_start = valid_positions[0].item()
+        resp_end = valid_positions[-1].item() + 1
+
+        # Find boundary positions
+        boundary_positions = is_boundary.nonzero(as_tuple=False).squeeze(1)
+
+        # Build steps as (start, end) tuples
+        steps = []
+        step_start = resp_start
+        if boundary_positions.numel() > 0:
+            for bp_idx in range(boundary_positions.numel()):
+                bp = boundary_positions[bp_idx].item()
+                if bp >= step_start:
+                    steps.append((step_start, bp + 1))
+                    step_start = bp + 1
+        # Handle remaining segment
+        if step_start < resp_end:
+            steps.append((step_start, resp_end))
+
+        if len(steps) == 0:
+            continue
+
+        # Score each step: sum of entropies of top token_top_ratio tokens within the step
+        step_scores = torch.zeros(len(steps), device=device)
+        for si, (s_start, s_end) in enumerate(steps):
+            step_ent = entropy[b, s_start:s_end]
+            step_valid = response_mask[b, s_start:s_end].bool()
+            valid_ent = step_ent[step_valid]
+
+            if valid_ent.numel() == 0:
+                continue
+
+            k = max(1, int(valid_ent.numel() * token_top_ratio + 0.9999))  # ceil
+            k = min(k, valid_ent.numel())
+            topk_vals, _ = torch.topk(valid_ent, k=k)
+            step_scores[si] = topk_vals.sum()
+
+        # Select top step_top_ratio steps
+        num_selected = max(1, int(len(steps) * step_top_ratio + 0.9999))  # ceil
+        num_selected = min(num_selected, len(steps))
+        _, topk_step_idx = torch.topk(step_scores, k=num_selected)
+
+        # Build mask: set 1 for all tokens in selected steps
+        for idx in topk_step_idx:
+            s_start, s_end = steps[idx.item()]
+            result_mask[b, s_start:s_end] = 1
+
+    return result_mask
+
+
 def register_policy_loss(name: str) -> Callable[[PolicyLossFn], PolicyLossFn]:
     """Register a policy loss function with the given name.
 

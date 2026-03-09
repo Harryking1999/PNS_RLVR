@@ -126,3 +126,13 @@ logs
 log
 outputs
 .history
+
+# training logs
+nohup.out.*
+
+# wheel packages
+*.whl
+*.whl.1
+
+# local checkpoints
+ckpts/

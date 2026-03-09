@@ -30,6 +30,7 @@ from verl import DataProto
 from verl.trainer.ppo.core_algos import (
     agg_loss,
     get_global_entropy_top_mask,
+    get_step_entropy_top_mask,
     get_policy_loss_fn,
     kl_penalty,
 )
@@ -68,7 +69,8 @@ class DataParallelPPOActor(BasePPOActor):
         actor_optimizer (torch.optim.Optimizer, optional): Actor optimizer. Defaults to None.
     """
 
-    def __init__(self, config: ActorConfig, actor_module: nn.Module, actor_optimizer: torch.optim.Optimizer = None):
+    def __init__(self, config: ActorConfig, actor_module: nn.Module,
+                 actor_optimizer: torch.optim.Optimizer = None, tokenizer=None):
         """When optimizer is None, it is Reference Policy"""
         super().__init__(config)
         self.actor_module = actor_module
@@ -96,6 +98,50 @@ class DataParallelPPOActor(BasePPOActor):
             else entropy_from_logits
         )
         self.device_name = get_device_name()
+
+        # Step Forking DAPO: pre-compute step boundary token IDs
+        self.step_boundary_lookup = None
+        step_entropy_top_ratio = self.config.get('step_entropy_top_ratio', None)
+        if step_entropy_top_ratio is not None and step_entropy_top_ratio > 0:
+            assert tokenizer is not None, (
+                "tokenizer must be passed to DataParallelPPOActor when step_entropy_top_ratio is set"
+            )
+            self._precompute_step_boundary_lookup(tokenizer)
+
+    def _precompute_step_boundary_lookup(self, tokenizer):
+        """Pre-compute a boolean lookup table: boundary_lookup[token_id] = True
+        if the token's decoded text contains '\\n' or ends with '.', '?', '!', '。', '？', '！'.
+        This is used by Step Forking DAPO for response segmentation into steps.
+        """
+        import time
+        t0 = time.time()
+        SENTENCE_ENDINGS = {'.', '?', '!', '。', '？', '！'}
+        total_ids = len(tokenizer)
+        boundary_lookup = torch.zeros(total_ids, dtype=torch.bool)
+
+        for token_id in range(total_ids):
+            try:
+                text = tokenizer.decode([token_id])
+                if not text:
+                    continue
+                if '\n' in text:
+                    boundary_lookup[token_id] = True
+                    continue
+                stripped = text.rstrip()
+                if stripped and stripped[-1] in SENTENCE_ENDINGS:
+                    boundary_lookup[token_id] = True
+            except Exception:
+                pass
+
+        self.step_boundary_lookup = boundary_lookup
+        elapsed = time.time() - t0
+        n_boundary = boundary_lookup.sum().item()
+        if torch.distributed.get_rank() == 0:
+            print(
+                f"[Step Forking DAPO] Pre-computed {n_boundary}/{total_ids} boundary token IDs "
+                f"in {elapsed:.1f}s. step_entropy_top_ratio="
+                f"{self.config.get('step_entropy_top_ratio', None)}"
+            )
 
     def _forward_micro_batch(
         self, micro_batch, temperature, calculate_entropy=False
@@ -458,7 +504,21 @@ class DataParallelPPOActor(BasePPOActor):
                     
                     entropy_top_mask = None
                     if entropy_top_ratio is not None:
-                        entropy_top_mask = get_global_entropy_top_mask(entropy=entropy, response_mask=response_mask, top_ratio=entropy_top_ratio)
+                        step_entropy_top_ratio = self.config.get('step_entropy_top_ratio', None)
+                        if step_entropy_top_ratio is not None and step_entropy_top_ratio > 0 and self.step_boundary_lookup is not None:
+                            # Step Forking DAPO: use entropy_top_ratio for per-step scoring,
+                            # then select top step_entropy_top_ratio fraction of steps
+                            entropy_top_mask = get_step_entropy_top_mask(
+                                entropy=entropy,
+                                response_mask=response_mask,
+                                response_ids=model_inputs["responses"],
+                                boundary_lookup=self.step_boundary_lookup,
+                                token_top_ratio=entropy_top_ratio,
+                                step_top_ratio=step_entropy_top_ratio,
+                            )
+                        else:
+                            # Original Forking DAPO: token-level entropy masking
+                            entropy_top_mask = get_global_entropy_top_mask(entropy=entropy, response_mask=response_mask, top_ratio=entropy_top_ratio)
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla

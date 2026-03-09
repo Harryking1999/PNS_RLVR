@@ -232,6 +232,7 @@ actor_rollout_ref:
 
     # Added for "Beyond the 80/20 Rule" paper
     entropy_top_ratio: null # fraction of response tokens to keep (e.g. 0.2 = top 20%)
+    step_entropy_top_ratio: null # Step Forking DAPO: fraction of top high-entropy steps to keep (e.g. 0.1 = top 10%)
 
     # policy loss config
     policy_loss:

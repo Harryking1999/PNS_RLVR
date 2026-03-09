@@ -64,6 +64,7 @@ actor_rollout_ref:
     clip_ratio_c: 3.0 # lower bound of the value for Dual-clip PPO from https://arxiv.org/pdf/1912.09729 
     # Added for "Beyond the 80/20 Rule" paper
     entropy_top_ratio: null # fraction of response tokens to keep (e.g. 0.2 = top 20%)
+    step_entropy_top_ratio: null # Step Forking DAPO: fraction of top high-entropy steps to keep (e.g. 0.1 = top 10%)
     loss_agg_mode: "token-mean" # / "seq-mean-token-sum" / "seq-mean-token-mean"
     # NOTE: "token-mean" is the default behavior
     entropy_coeff: 0

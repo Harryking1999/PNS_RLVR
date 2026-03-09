@@ -53,6 +53,7 @@ actor_rollout_ref:
     clip_ratio_high: 0.2
     # Added for "Beyond the 80/20 Rule" paper
     entropy_top_ratio: null # fraction of response tokens to keep (e.g. 0.2 = top 20%)
+    step_entropy_top_ratio: null # Step Forking DAPO: fraction of top high-entropy steps to keep (e.g. 0.1 = top 10%)
     freeze_vision_tower: false
     policy_loss:
       _target_: verl.workers.config.PolicyLossConfig

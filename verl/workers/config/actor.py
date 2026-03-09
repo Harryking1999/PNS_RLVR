@@ -124,6 +124,12 @@ class ActorConfig(BaseConfig):
     # Added for "Beyond the 80/20 Rule" paper
     entropy_top_ratio: Optional[float] = None # fraction of response tokens to keep (e.g. 0.2 = top 20%)
 
+    # Step Forking DAPO: select top high-entropy steps instead of individual tokens.
+    # When set (e.g. 0.1 = top 10% steps), uses entropy_top_ratio for per-step scoring,
+    # then selects top step_entropy_top_ratio fraction of steps for gradient computation.
+    # Requires entropy_top_ratio to also be set. If None or 0, falls back to token-level forking.
+    step_entropy_top_ratio: Optional[float] = None
+
     def __post_init__(self):
         """Validate actor configuration parameters."""
         assert self.strategy != MISSING
