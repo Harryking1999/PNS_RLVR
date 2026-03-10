@@ -7,24 +7,27 @@ Step-Level Entropy Visualization Tool
 流程：
 1. 加载 base 模型，对若干数学题生成 response
 2. 计算每个 token 的熵
-3. 按换行符 + 句末标点切分为步骤
+3. 按指定方法切分为步骤 (punctuation 或 double_newline)
 4. 用不同超参 (10%, 20%, 30%) 展示被选中的步骤
 
 Usage:
-    CUDA_VISIBLE_DEVICES=3 python tools/visualize_step_entropy.py
+    # GPU 模式：生成 + 可视化 + 保存缓存
+    CUDA_VISIBLE_DEVICES=3 python tools/visualize_step_entropy.py --save_cache tools/cache_1.7B.pkl
     CUDA_VISIBLE_DEVICES=3 python tools/visualize_step_entropy.py --model /path/to/Qwen3-4B-Base
-    CUDA_VISIBLE_DEVICES=3 python tools/visualize_step_entropy.py --num_samples 10 --max_new_tokens 4096
+
+    # CPU 模式：从缓存加载，换用 \\n\\n 切分（无需 GPU）
+    python tools/visualize_step_entropy.py --load_cache tools/cache_1.7B.pkl --segment_method double_newline
 """
 
 import os
 import argparse
+import json
 import math
+import pickle
 from collections import Counter
 
 import numpy as np
 import pandas as pd
-import torch
-from transformers import AutoTokenizer, AutoModelForCausalLM
 
 
 # ──────────────────────────── ANSI colors ────────────────────────────
@@ -111,7 +114,7 @@ def generate_and_compute_entropy(model, tokenizer, prompt_text,
     return response_text, response_tokens, response_token_ids, token_entropies
 
 
-def segment_into_steps(response_tokens, response_token_ids):
+def segment_into_steps_punctuation(response_tokens, response_token_ids):
     """
     将 response 按换行符 + 句末标点切分为步骤。
 
@@ -152,6 +155,99 @@ def segment_into_steps(response_tokens, response_token_ids):
         })
 
     return steps
+
+
+def segment_into_steps_double_newline(response_tokens, response_token_ids):
+    """
+    将 response 按 \\n\\n (连续两个换行) 切分为步骤。
+
+    切分规则：在 token 序列中找到 \\n\\n 出现的位置，以此为分隔符切分。
+    包含 \\n\\n 的 token 作为当前 step 的最后一个 token。
+    """
+    # 先拼出完整文本，记录每个 token 对应的字符区间
+    char_offsets = []  # (char_start, char_end) for each token
+    pos = 0
+    full_text = ''.join(response_tokens)
+    for i, tok in enumerate(response_tokens):
+        char_offsets.append((pos, pos + len(tok)))
+        pos += len(tok)
+
+    # 找出所有 \n\n 在 full_text 中的位置
+    split_positions = []
+    search_start = 0
+    while True:
+        idx = full_text.find('\n\n', search_start)
+        if idx == -1:
+            break
+        split_positions.append(idx)
+        # 跳过连续的换行（如 \n\n\n 只算一次）
+        search_start = idx + 2
+        while search_start < len(full_text) and full_text[search_start] == '\n':
+            search_start += 1
+
+    if not split_positions:
+        # 没有 \n\n，整个 response 为一个 step
+        return [{
+            'start': 0,
+            'end': len(response_tokens),
+            'token_indices': list(range(len(response_tokens))),
+            'text': full_text,
+        }]
+
+    # 对每个 \n\n 位置，找到它落在哪个 token 里（作为该 step 的末尾 token）
+    boundary_token_indices = []
+    for sp in split_positions:
+        # \n\n 的最后一个字符在 sp+1 处
+        nn_end = sp + 1
+        for i, (cs, ce) in enumerate(char_offsets):
+            if cs <= nn_end < ce:
+                boundary_token_indices.append(i)
+                break
+        else:
+            # nn_end 正好在某个 token 末尾
+            for i, (cs, ce) in enumerate(char_offsets):
+                if ce == nn_end + 1:
+                    boundary_token_indices.append(i)
+                    break
+
+    # 去重并排序
+    boundary_token_indices = sorted(set(boundary_token_indices))
+
+    # 构建 steps
+    steps = []
+    current_start = 0
+    for boundary_idx in boundary_token_indices:
+        end = boundary_idx + 1
+        if end <= current_start:
+            continue
+        if end >= len(response_tokens):
+            break
+        steps.append({
+            'start': current_start,
+            'end': end,
+            'token_indices': list(range(current_start, end)),
+            'text': ''.join(response_tokens[current_start:end]),
+        })
+        current_start = end
+
+    # last segment
+    if current_start < len(response_tokens):
+        steps.append({
+            'start': current_start,
+            'end': len(response_tokens),
+            'token_indices': list(range(current_start, len(response_tokens))),
+            'text': ''.join(response_tokens[current_start:]),
+        })
+
+    return steps
+
+
+def segment_into_steps(response_tokens, response_token_ids, method="punctuation"):
+    """根据 method 选择切分方法。"""
+    if method == "double_newline":
+        return segment_into_steps_double_newline(response_tokens, response_token_ids)
+    else:
+        return segment_into_steps_punctuation(response_tokens, response_token_ids)
 
 
 def compute_step_entropy_scores(steps, token_entropies, token_top_ratio=0.2):
@@ -374,6 +470,38 @@ def print_token_statistics(results, token_top_ratio=0.2):
         print(f"    {tok:35s}  count={cnt}")
 
 
+# ──────────────────────────── Cache helpers ──────────────────────────
+
+def save_cache(results, cache_path):
+    """保存中间结果（token + entropy 数据）到 pickle 文件，供后续无 GPU 使用。"""
+    # 保存前把 numpy array 转成 list 以便 pickle 兼容
+    to_save = []
+    for r in results:
+        to_save.append({
+            'prompt': r['prompt'],
+            'response_text': r['response_text'],
+            'response_tokens': r['response_tokens'],
+            'response_token_ids': r['response_token_ids'],
+            'token_entropies': r['token_entropies'].tolist()
+                if hasattr(r['token_entropies'], 'tolist') else list(r['token_entropies']),
+        })
+    with open(cache_path, 'wb') as f:
+        pickle.dump(to_save, f)
+    print(f"  Cache saved to {cache_path}")
+
+
+def load_cache(cache_path):
+    """从 pickle 缓存加载中间结果，不需要 GPU。"""
+    with open(cache_path, 'rb') as f:
+        cached = pickle.load(f)
+    results = []
+    for r in cached:
+        r['token_entropies'] = np.array(r['token_entropies'])
+        results.append(r)
+    print(f"  Loaded {len(results)} samples from cache: {cache_path}")
+    return results
+
+
 # ──────────────────────────── Main ───────────────────────────────────
 
 def main():
@@ -396,59 +524,92 @@ def main():
                         help="Fraction of tokens considered high-entropy (default 0.2)")
     parser.add_argument("--step_top_ratios", type=str, default="0.1,0.2,0.3",
                         help="Comma-separated step top ratios to visualize")
+    parser.add_argument("--segment_method", type=str, default="punctuation",
+                        choices=["punctuation", "double_newline"],
+                        help="Step segmentation method: 'punctuation' (\\n + 句末标点) "
+                             "or 'double_newline' (\\n\\n)")
+    parser.add_argument("--save_cache", type=str, default=None,
+                        help="Save intermediate token/entropy data to this pickle file")
+    parser.add_argument("--load_cache", type=str, default=None,
+                        help="Load intermediate data from cache (no GPU needed)")
     args = parser.parse_args()
 
     step_top_ratios = [float(x) for x in args.step_top_ratios.split(",")]
-    device = "cuda:0"
 
-    # ---- Load model ----
-    print_separator("Loading Model")
-    print(f"  Model: {args.model}")
-    tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
-    model = AutoModelForCausalLM.from_pretrained(
-        args.model, torch_dtype=torch.bfloat16, trust_remote_code=True
-    ).to(device).eval()
-    print(f"  Loaded. Vocab size: {tokenizer.vocab_size}")
+    if args.load_cache:
+        # ---- CPU-only mode: load from cache ----
+        print_separator("Loading from Cache (no GPU)")
+        results = load_cache(args.load_cache)
 
-    # ---- Load data ----
-    print_separator("Loading Data")
-    df = pd.read_parquet(args.data)
-    samples = df.sample(n=args.num_samples, random_state=args.seed)
+        # Re-segment with the chosen method
+        print_separator(f"Re-segmenting with method='{args.segment_method}'")
+        for r in results:
+            r['steps'] = segment_into_steps(
+                r['response_tokens'], r['response_token_ids'],
+                method=args.segment_method
+            )
+            print(f"  {len(r['response_tokens'])} tokens -> {len(r['steps'])} steps")
+    else:
+        # ---- GPU mode: generate and compute entropy ----
+        import torch
+        from transformers import AutoTokenizer, AutoModelForCausalLM
 
-    prompts = []
-    for _, row in samples.iterrows():
-        msgs = row["prompt"]
-        if isinstance(msgs, (list, np.ndarray)):
-            user_msg = str(msgs[0]["content"]) if len(msgs) > 0 else str(msgs)
-        else:
-            user_msg = str(msgs)
-        prompts.append(user_msg)
+        device = "cuda:0"
 
-    print(f"  Sampled {len(prompts)} prompts from {args.data}")
+        # ---- Load model ----
+        print_separator("Loading Model")
+        print(f"  Model: {args.model}")
+        tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model, torch_dtype=torch.bfloat16, trust_remote_code=True
+        ).to(device).eval()
+        print(f"  Loaded. Vocab size: {tokenizer.vocab_size}")
 
-    # ---- Generate & compute entropy ----
-    print_separator("Generating Responses")
-    results = []
-    for i, prompt in enumerate(prompts):
-        print(f"  [{i+1}/{len(prompts)}] Generating...")
-        resp_text, resp_tokens, resp_ids, entropies = generate_and_compute_entropy(
-            model, tokenizer, prompt,
-            max_new_tokens=args.max_new_tokens,
-            temperature=args.temperature,
-            top_p=args.top_p,
-            device=device,
-        )
-        r = {
-            'prompt': prompt,
-            'response_text': resp_text,
-            'response_tokens': resp_tokens,
-            'response_token_ids': resp_ids,
-            'token_entropies': entropies,
-        }
-        r['steps'] = segment_into_steps(resp_tokens, resp_ids)
-        results.append(r)
-        print(f"         {len(resp_tokens)} tokens, {len(r['steps'])} steps, "
-              f"avg entropy={entropies.mean():.3f}")
+        # ---- Load data ----
+        print_separator("Loading Data")
+        df = pd.read_parquet(args.data)
+        samples = df.sample(n=args.num_samples, random_state=args.seed)
+
+        prompts = []
+        for _, row in samples.iterrows():
+            msgs = row["prompt"]
+            if isinstance(msgs, (list, np.ndarray)):
+                user_msg = str(msgs[0]["content"]) if len(msgs) > 0 else str(msgs)
+            else:
+                user_msg = str(msgs)
+            prompts.append(user_msg)
+
+        print(f"  Sampled {len(prompts)} prompts from {args.data}")
+
+        # ---- Generate & compute entropy ----
+        print_separator("Generating Responses")
+        results = []
+        for i, prompt in enumerate(prompts):
+            print(f"  [{i+1}/{len(prompts)}] Generating...")
+            resp_text, resp_tokens, resp_ids, entropies = generate_and_compute_entropy(
+                model, tokenizer, prompt,
+                max_new_tokens=args.max_new_tokens,
+                temperature=args.temperature,
+                top_p=args.top_p,
+                device=device,
+            )
+            r = {
+                'prompt': prompt,
+                'response_text': resp_text,
+                'response_tokens': resp_tokens,
+                'response_token_ids': resp_ids,
+                'token_entropies': entropies,
+            }
+            r['steps'] = segment_into_steps(resp_tokens, resp_ids,
+                                            method=args.segment_method)
+            results.append(r)
+            print(f"         {len(resp_tokens)} tokens, {len(r['steps'])} steps, "
+                  f"avg entropy={entropies.mean():.3f}")
+
+        # ---- Save cache if requested ----
+        if args.save_cache:
+            print_separator("Saving Cache")
+            save_cache(results, args.save_cache)
 
     # ---- Per-sample visualization ----
     for i, r in enumerate(results):
