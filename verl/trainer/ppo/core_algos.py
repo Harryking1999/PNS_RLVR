@@ -53,38 +53,52 @@ POLICY_LOSS_REGISTRY: dict[str, PolicyLossFn] = {}
 def get_global_entropy_top_mask(entropy, response_mask, top_ratio=0.2):
     """
     Select the top `top_ratio` high-entropy tokens among all response tokens in a batch.
-    
+
     Args:
         entropy: [B, S] tensor of token entropies.
         response_mask: [B, S] tensor (1 = response token, 0 = non-response).
         top_ratio: fraction of response tokens to keep (e.g. 0.2 = top 20%).
-        
+
     Returns:
         entropy_top_mask: [B, S] binary mask (1 = selected top entropy token)
     """
-    
-    # Flatten
     flat_entropy = entropy.flatten()
     flat_mask = response_mask.flatten().bool()
-    
-    # Filter response token
+
     response_entropy = flat_entropy[flat_mask]
     if response_entropy.numel() == 0:
         return torch.zeros_like(entropy, dtype=torch.long)
 
-    # Top-k selection
-    top_k = max(1, int(len(response_entropy) * top_ratio + 0.9999)) # ceil
+    top_k = max(1, int(len(response_entropy) * top_ratio + 0.9999))
     _, topk_idx = torch.topk(response_entropy, k=top_k)
-    
-    # Map back to original flat indices
+
     response_positions = flat_mask.nonzero(as_tuple=False).squeeze(1)
     top_positions = response_positions[topk_idx]
-    
-    # Build mask
+
     flat_out = torch.zeros_like(flat_entropy, dtype=torch.long)
     flat_out[top_positions] = 1
-    
-    return flat_out.view_as(entropy)  
+
+    return flat_out.view_as(entropy)
+
+
+def get_rollout_entropy_top_mask(entropy: torch.Tensor, response_mask: torch.Tensor, top_ratio: float = 0.2) -> torch.Tensor:
+    """Select top-entropy tokens independently inside each rollout (sample)."""
+    B, S = entropy.shape
+    result_mask = torch.zeros(B, S, dtype=torch.long, device=entropy.device)
+
+    for b in range(B):
+        valid = response_mask[b].bool()
+        if not valid.any():
+            continue
+        valid_entropy = entropy[b][valid]
+        k = max(1, int(valid_entropy.numel() * top_ratio + 0.9999))
+        k = min(k, valid_entropy.numel())
+        _, topk_local_idx = torch.topk(valid_entropy, k=k)
+        valid_positions = valid.nonzero(as_tuple=False).squeeze(1)
+        top_positions = valid_positions[topk_local_idx]
+        result_mask[b, top_positions] = 1
+
+    return result_mask
 
 
 def get_step_entropy_top_mask(
@@ -94,33 +108,30 @@ def get_step_entropy_top_mask(
     boundary_lookup: torch.Tensor,
     token_top_ratio: float = 0.2,
     step_top_ratio: float = 0.1,
-) -> torch.Tensor:
+    token_top_scope: str = "rollout",
+    return_step_pns: bool = False,
+) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
     """
-    Step Forking DAPO: select top high-entropy *steps* (sentences) instead of individual tokens.
+    Step Forking DAPO / PNS_RLVR helper.
 
-    For each sample in the batch:
-    1. Segment the response into steps using pre-computed boundary token IDs
-       (tokens whose decoded text contains '\\n' or ends with '.', '?', '!', etc.)
-    2. Score each step: sum of entropies of the top `token_top_ratio` high-entropy tokens within that step.
-    3. Select the top `step_top_ratio` fraction of steps.
-    4. Build a mask covering ALL tokens in the selected steps.
-
-    Args:
-        entropy: [B, S] tensor of per-token entropies.
-        response_mask: [B, S] tensor (1 = response token, 0 = pad/prompt).
-        response_ids: [B, S] tensor of token IDs for the response.
-        boundary_lookup: [vocab_size] boolean tensor. True = this token ID marks a step boundary.
-        token_top_ratio: fraction of high-entropy tokens within each step for scoring (e.g. 0.2).
-        step_top_ratio: fraction of top steps to select (e.g. 0.1 = top 10%).
-
-    Returns:
-        step_mask: [B, S] binary mask (1 = token is in a selected step, dtype=torch.long).
+    1) Select high-entropy tokens either per-rollout or globally in the batch.
+    2) Segment each rollout into steps.
+    3) Score each step by summing entropy of selected high-entropy tokens in that step.
+    4) Select top steps within each rollout and return token mask over selected steps.
+    5) Optionally return token-level step-PNS proxy in [0, 1] for selected steps.
     """
     B, S = entropy.shape
     device = entropy.device
     result_mask = torch.zeros(B, S, dtype=torch.long, device=device)
+    step_pns_token = torch.zeros(B, S, dtype=entropy.dtype, device=device)
 
-    # Ensure boundary_lookup is on the correct device and large enough
+    if token_top_scope == "batch":
+        token_top_mask = get_global_entropy_top_mask(entropy=entropy, response_mask=response_mask, top_ratio=token_top_ratio)
+    elif token_top_scope == "rollout":
+        token_top_mask = get_rollout_entropy_top_mask(entropy=entropy, response_mask=response_mask, top_ratio=token_top_ratio)
+    else:
+        raise ValueError(f"Unsupported token_top_scope={token_top_scope}")
+
     boundary_lookup = boundary_lookup.to(device)
     lookup_size = boundary_lookup.shape[0]
 
@@ -129,22 +140,18 @@ def get_step_entropy_top_mask(
         if not valid.any():
             continue
 
-        ids = response_ids[b]  # [S]
-        # Safe indexing: clamp IDs to lookup range
+        ids = response_ids[b]
         ids_safe = ids.clamp(0, lookup_size - 1)
-        is_boundary = boundary_lookup[ids_safe] & valid  # [S]
+        is_boundary = boundary_lookup[ids_safe] & valid
 
-        # Find valid response range
         valid_positions = valid.nonzero(as_tuple=False).squeeze(1)
         if valid_positions.numel() == 0:
             continue
         resp_start = valid_positions[0].item()
         resp_end = valid_positions[-1].item() + 1
 
-        # Find boundary positions
         boundary_positions = is_boundary.nonzero(as_tuple=False).squeeze(1)
 
-        # Build steps as (start, end) tuples
         steps = []
         step_start = resp_start
         if boundary_positions.numel() > 0:
@@ -153,40 +160,43 @@ def get_step_entropy_top_mask(
                 if bp >= step_start:
                     steps.append((step_start, bp + 1))
                     step_start = bp + 1
-        # Handle remaining segment
         if step_start < resp_end:
             steps.append((step_start, resp_end))
 
         if len(steps) == 0:
             continue
 
-        # Score each step: sum of entropies of top token_top_ratio tokens within the step
-        step_scores = torch.zeros(len(steps), device=device)
+        step_scores = torch.zeros(len(steps), dtype=entropy.dtype, device=device)
         for si, (s_start, s_end) in enumerate(steps):
-            step_ent = entropy[b, s_start:s_end]
             step_valid = response_mask[b, s_start:s_end].bool()
-            valid_ent = step_ent[step_valid]
-
-            if valid_ent.numel() == 0:
+            if not step_valid.any():
                 continue
+            selected_in_step = token_top_mask[b, s_start:s_end].bool() & step_valid
+            if selected_in_step.any():
+                score = entropy[b, s_start:s_end][selected_in_step].sum()
+            else:
+                score = torch.tensor(0.0, dtype=entropy.dtype, device=device)
+            step_scores[si] = score
 
-            k = max(1, int(valid_ent.numel() * token_top_ratio + 0.9999))  # ceil
-            k = min(k, valid_ent.numel())
-            topk_vals, _ = torch.topk(valid_ent, k=k)
-            step_scores[si] = topk_vals.sum()
-
-        # Select top step_top_ratio steps
-        num_selected = max(1, int(len(steps) * step_top_ratio + 0.9999))  # ceil
+        num_selected = max(1, int(len(steps) * step_top_ratio + 0.9999))
         num_selected = min(num_selected, len(steps))
         _, topk_step_idx = torch.topk(step_scores, k=num_selected)
 
-        # Build mask: set 1 for all tokens in selected steps
+        # Normalize selected step scores to [0, 1] as a step-level PNS proxy.
+        selected_scores = step_scores[topk_step_idx]
+        max_score = selected_scores.max() if selected_scores.numel() > 0 else torch.tensor(0.0, device=device, dtype=entropy.dtype)
+        denom = torch.clamp(max_score, min=1e-8)
+
         for idx in topk_step_idx:
             s_start, s_end = steps[idx.item()]
             result_mask[b, s_start:s_end] = 1
+            if return_step_pns:
+                step_pns = torch.clamp(step_scores[idx] / denom, min=0.0, max=1.0)
+                step_pns_token[b, s_start:s_end] = step_pns
 
+    if return_step_pns:
+        return result_mask, step_pns_token
     return result_mask
-
 
 def register_policy_loss(name: str) -> Callable[[PolicyLossFn], PolicyLossFn]:
     """Register a policy loss function with the given name.
@@ -1029,6 +1039,7 @@ def compute_policy_loss_vanilla(
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
     entropy_top_mask: torch.Tensor | None = None,
+    pns_token_bonus: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -1101,6 +1112,10 @@ def compute_policy_loss_vanilla(
     # Apply rollout importance sampling weights if provided
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
+
+    # PNS_RLVR: token-level signed additional loss on selected step tokens.
+    if pns_token_bonus is not None:
+        pg_losses = pg_losses + pns_token_bonus
 
     if entropy_top_mask is None:
         pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)

@@ -389,3 +389,53 @@ CUDA_VISIBLE_DEVICES=0 python tools/eval_benchmarks.py \
 CUDA_VISIBLE_DEVICES=0 python PNS_test/compute_pns.py \
     --model /path/to/checkpoint --num_problems 30 --num_rollouts 5
 ```
+
+---
+
+## 九、PNS_RLVR 在线训练实现（2026-03-14）
+
+### 9.1 对应需求与实现
+
+1. **高熵 token 选择支持两种范围**
+   - 新增 `entropy_top_scope` 配置：`rollout` / `batch`
+   - `rollout`：每条 rollout 内独立取 top entropy token
+   - `batch`：在当前 batch 全局取 top entropy token
+
+2. **每条 rollout 的高熵步骤选择**
+   - 复用现有步骤边界切分（`boundary_lookup`）
+   - 在每条 rollout 内按步骤分数选 top `step_entropy_top_ratio` 步骤
+
+3. **步骤 PNS 计算（训练内近似）**
+   - 在步骤级筛选时，可返回 `step_pns_token [B,S]`
+   - 当前实现采用在线近似：对被选步骤分数做归一化，作为 step-level PNS proxy（范围 [0,1]）
+
+4. **signed masked 附加 loss**
+   - 对正确轨迹（`acc=1`）：`+ lambda * PNS`
+   - 对错误轨迹（`acc=0`）：`- lambda * PNS`
+   - 在 vanilla policy loss 中以 token 级 bonus 形式注入，并与 `entropy_top_mask` 共同作用
+
+### 9.2 代码改动点
+
+- `verl/trainer/ppo/core_algos.py`
+  - 新增：`get_rollout_entropy_top_mask()`
+  - 扩展：`get_step_entropy_top_mask(..., token_top_scope, return_step_pns)`
+  - 扩展：`compute_policy_loss_vanilla(..., pns_token_bonus=None)`
+
+- `verl/workers/actor/dp_actor.py`
+  - `update_policy()` 中新增：
+    - 读取 `entropy_top_scope` / `pns_rlvr_enable` / `pns_lambda`
+    - 选择 `rollout` 或 `batch` 的高熵 token 范围
+    - 构造 `pns_token_bonus = lambda * step_pns_token * sign(acc)`
+    - 仅在 `loss_mode == "vanilla"` 时传入 `pns_token_bonus`
+
+- `verl/workers/config/actor.py`
+  - 新增配置：
+    - `entropy_top_scope: str = "rollout"`
+    - `pns_rlvr_enable: bool = False`
+    - `pns_lambda: float = 0.0`
+  - 新增校验：`entropy_top_scope` 合法性、`pns_lambda >= 0`
+
+- `verl/trainer/config/actor/actor.yaml`
+- `verl/trainer/config/_generated_ppo_trainer.yaml`
+- `verl/trainer/config/_generated_ppo_megatron_trainer.yaml`
+  - 同步新增上述 3 个配置项默认值

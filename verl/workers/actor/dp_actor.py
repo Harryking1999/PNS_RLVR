@@ -443,6 +443,11 @@ class DataParallelPPOActor(BasePPOActor):
         has_multi_modal_inputs = "multi_modal_inputs" in data.non_tensor_batch.keys()
         non_tensor_select_keys = ["multi_modal_inputs"] if has_multi_modal_inputs else []
 
+        # PNS_RLVR needs trajectory correctness labels (acc) from reward manager.
+        pns_rlvr_enable = self.config.get("pns_rlvr_enable", False)
+        if pns_rlvr_enable and "acc" in data.non_tensor_batch.keys() and "acc" not in non_tensor_select_keys:
+            non_tensor_select_keys.append("acc")
+
         data = data.select(batch_keys=select_keys, non_tensor_batch_keys=non_tensor_select_keys)
 
         # Split to make minibatch iterator for updating the actor
@@ -503,22 +508,53 @@ class DataParallelPPOActor(BasePPOActor):
                             old_log_prob = model_inputs["old_log_probs"]
                     
                     entropy_top_mask = None
+                    step_pns_token = None
+                    entropy_top_scope = self.config.get("entropy_top_scope", "rollout")
+                    step_entropy_top_ratio = self.config.get('step_entropy_top_ratio', None)
                     if entropy_top_ratio is not None:
-                        step_entropy_top_ratio = self.config.get('step_entropy_top_ratio', None)
                         if step_entropy_top_ratio is not None and step_entropy_top_ratio > 0 and self.step_boundary_lookup is not None:
-                            # Step Forking DAPO: use entropy_top_ratio for per-step scoring,
-                            # then select top step_entropy_top_ratio fraction of steps
-                            entropy_top_mask = get_step_entropy_top_mask(
-                                entropy=entropy,
-                                response_mask=response_mask,
-                                response_ids=model_inputs["responses"],
-                                boundary_lookup=self.step_boundary_lookup,
-                                token_top_ratio=entropy_top_ratio,
-                                step_top_ratio=step_entropy_top_ratio,
-                            )
+                            # Step Forking DAPO / PNS_RLVR: select high-entropy steps inside each rollout.
+                            if pns_rlvr_enable:
+                                entropy_top_mask, step_pns_token = get_step_entropy_top_mask(
+                                    entropy=entropy,
+                                    response_mask=response_mask,
+                                    response_ids=model_inputs["responses"],
+                                    boundary_lookup=self.step_boundary_lookup,
+                                    token_top_ratio=entropy_top_ratio,
+                                    step_top_ratio=step_entropy_top_ratio,
+                                    token_top_scope=entropy_top_scope,
+                                    return_step_pns=True,
+                                )
+                            else:
+                                entropy_top_mask = get_step_entropy_top_mask(
+                                    entropy=entropy,
+                                    response_mask=response_mask,
+                                    response_ids=model_inputs["responses"],
+                                    boundary_lookup=self.step_boundary_lookup,
+                                    token_top_ratio=entropy_top_ratio,
+                                    step_top_ratio=step_entropy_top_ratio,
+                                    token_top_scope=entropy_top_scope,
+                                )
                         else:
-                            # Original Forking DAPO: token-level entropy masking
-                            entropy_top_mask = get_global_entropy_top_mask(entropy=entropy, response_mask=response_mask, top_ratio=entropy_top_ratio)
+                            # Original token-level entropy masking across current mini-batch.
+                            entropy_top_mask = get_global_entropy_top_mask(
+                                entropy=entropy, response_mask=response_mask, top_ratio=entropy_top_ratio
+                            )
+
+                    pns_token_bonus = None
+                    pns_lambda = float(self.config.get("pns_lambda", 0.0))
+                    if pns_rlvr_enable and pns_lambda > 0 and step_pns_token is not None:
+                        if "acc" in model_inputs:
+                            acc_np = model_inputs["acc"]
+                            acc_t = torch.as_tensor(acc_np, dtype=entropy.dtype, device=entropy.device).view(-1, 1)
+                        else:
+                            acc_t = torch.zeros((response_mask.shape[0], 1), dtype=entropy.dtype, device=entropy.device)
+
+                        sign = torch.where(acc_t > 0, torch.ones_like(acc_t), -torch.ones_like(acc_t))
+                        pns_token_bonus = pns_lambda * step_pns_token * sign * response_mask.to(entropy.dtype)
+                        if entropy_top_mask is not None:
+                            pns_token_bonus = pns_token_bonus * entropy_top_mask.to(entropy.dtype)
+                        micro_batch_metrics["actor/pns_bonus_mean"] = pns_token_bonus.abs().mean().detach().item()
 
                     loss_mode = self.config.policy_loss.get("loss_mode", "vanilla")
                     # vanilla -> verl.trainer.ppo.core_algos.compute_policy_loss_vanilla
@@ -537,16 +573,28 @@ class DataParallelPPOActor(BasePPOActor):
                     policy_loss_fn = get_policy_loss_fn(loss_mode)
 
                     # Compute policy loss (all functions return 4 values)
-                    pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
-                        old_log_prob=old_log_prob,
-                        log_prob=log_prob,
-                        advantages=advantages,
-                        response_mask=response_mask,
-                        loss_agg_mode=loss_agg_mode,
-                        config=self.config,
-                        rollout_is_weights=rollout_is_weights,
-                        entropy_top_mask=entropy_top_mask,
-                    )
+                    if loss_mode == "vanilla":
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=rollout_is_weights,
+                            entropy_top_mask=entropy_top_mask,
+                            pns_token_bonus=pns_token_bonus,
+                        )
+                    else:
+                        pg_loss, pg_clipfrac, ppo_kl, pg_clipfrac_lower = policy_loss_fn(
+                            old_log_prob=old_log_prob,
+                            log_prob=log_prob,
+                            advantages=advantages,
+                            response_mask=response_mask,
+                            loss_agg_mode=loss_agg_mode,
+                            config=self.config,
+                            rollout_is_weights=rollout_is_weights,
+                        )
 
                     if entropy_coeff != 0:
                         entropy_loss = agg_loss(loss_mat=entropy, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)

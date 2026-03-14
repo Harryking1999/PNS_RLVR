@@ -130,6 +130,17 @@ class ActorConfig(BaseConfig):
     # Requires entropy_top_ratio to also be set. If None or 0, falls back to token-level forking.
     step_entropy_top_ratio: Optional[float] = None
 
+    # Scope of selecting high-entropy tokens used by Step Forking scoring.
+    # - "rollout": select top tokens within each rollout independently.
+    # - "batch": select top tokens globally across the mini-batch.
+    entropy_top_scope: str = "rollout"
+
+    # PNS_RLVR: enable step-level PNS-weighted additional policy loss.
+    pns_rlvr_enable: bool = False
+
+    # PNS_RLVR: additional loss scale lambda.
+    pns_lambda: float = 0.0
+
     def __post_init__(self):
         """Validate actor configuration parameters."""
         assert self.strategy != MISSING
@@ -155,6 +166,12 @@ class ActorConfig(BaseConfig):
         ]
         if self.loss_agg_mode not in valid_loss_agg_modes:
             raise ValueError(f"Invalid loss_agg_mode: {self.loss_agg_mode}")
+
+        if self.entropy_top_scope not in ["rollout", "batch"]:
+            raise ValueError(f"Invalid entropy_top_scope: {self.entropy_top_scope}")
+
+        if self.pns_lambda < 0:
+            raise ValueError(f"pns_lambda must be >= 0, got {self.pns_lambda}")
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""
