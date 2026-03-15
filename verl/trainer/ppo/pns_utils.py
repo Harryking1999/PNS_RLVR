@@ -532,7 +532,9 @@ def inject_pns_into_advantage(
     pns_values = []
     pns_bonuses = []
     pos_pns = []
+    pos_bonuses = []
     neg_pns = []
+    neg_bonuses = []
 
     for cand in candidates:
         b = cand["rollout_idx"]
@@ -550,8 +552,10 @@ def inject_pns_into_advantage(
         pns_bonuses.append(bonus)
         if cand["acc"] > 0:
             pos_pns.append(pns)
+            pos_bonuses.append(bonus)
         else:
             neg_pns.append(pns)
+            neg_bonuses.append(bonus)
 
     # Compute metrics
     metrics["pns/n_tested_steps"] = len(candidates)
@@ -560,9 +564,11 @@ def inject_pns_into_advantage(
     metrics["pns/dry_run"] = 1.0 if dry_run else 0.0
     if pos_pns:
         metrics["pns/mean_pos_pns"] = float(np.mean(pos_pns))
+        metrics["pns/mean_pos_bonus"] = float(np.mean(pos_bonuses))
         metrics["pns/n_pos_steps"] = len(pos_pns)
     if neg_pns:
         metrics["pns/mean_neg_pns"] = float(np.mean(neg_pns))
+        metrics["pns/mean_neg_bonus"] = float(np.mean(neg_bonuses))
         metrics["pns/n_neg_steps"] = len(neg_pns)
 
     return advantages, metrics
