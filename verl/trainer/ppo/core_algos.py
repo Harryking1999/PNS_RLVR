@@ -109,21 +109,20 @@ def get_step_entropy_top_mask(
     token_top_ratio: float = 0.2,
     step_top_ratio: float = 0.1,
     token_top_scope: str = "rollout",
-    return_step_pns: bool = False,
-) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor]:
+) -> torch.Tensor:
     """
-    Step Forking DAPO / PNS_RLVR helper.
+    Step Forking DAPO helper.
 
     1) Select high-entropy tokens either per-rollout or globally in the batch.
-    2) Segment each rollout into steps.
+    2) Segment each rollout into steps (via shared segment_response_into_steps).
     3) Score each step by summing entropy of selected high-entropy tokens in that step.
     4) Select top steps within each rollout and return token mask over selected steps.
-    5) Optionally return token-level step-PNS proxy in [0, 1] for selected steps.
     """
+    from verl.trainer.ppo.pns_utils import segment_response_into_steps
+
     B, S = entropy.shape
     device = entropy.device
     result_mask = torch.zeros(B, S, dtype=torch.long, device=device)
-    step_pns_token = torch.zeros(B, S, dtype=entropy.dtype, device=device)
 
     if token_top_scope == "batch":
         token_top_mask = get_global_entropy_top_mask(entropy=entropy, response_mask=response_mask, top_ratio=token_top_ratio)
@@ -133,36 +132,13 @@ def get_step_entropy_top_mask(
         raise ValueError(f"Unsupported token_top_scope={token_top_scope}")
 
     boundary_lookup = boundary_lookup.to(device)
-    lookup_size = boundary_lookup.shape[0]
 
     for b in range(B):
-        valid = response_mask[b].bool()
-        if not valid.any():
-            continue
-
-        ids = response_ids[b]
-        ids_safe = ids.clamp(0, lookup_size - 1)
-        is_boundary = boundary_lookup[ids_safe] & valid
-
-        valid_positions = valid.nonzero(as_tuple=False).squeeze(1)
-        if valid_positions.numel() == 0:
-            continue
-        resp_start = valid_positions[0].item()
-        resp_end = valid_positions[-1].item() + 1
-
-        boundary_positions = is_boundary.nonzero(as_tuple=False).squeeze(1)
-
-        steps = []
-        step_start = resp_start
-        if boundary_positions.numel() > 0:
-            for bp_idx in range(boundary_positions.numel()):
-                bp = boundary_positions[bp_idx].item()
-                if bp >= step_start:
-                    steps.append((step_start, bp + 1))
-                    step_start = bp + 1
-        if step_start < resp_end:
-            steps.append((step_start, resp_end))
-
+        steps = segment_response_into_steps(
+            response_ids=response_ids[b],
+            response_mask=response_mask[b],
+            boundary_lookup=boundary_lookup,
+        )
         if len(steps) == 0:
             continue
 
@@ -182,20 +158,10 @@ def get_step_entropy_top_mask(
         num_selected = min(num_selected, len(steps))
         _, topk_step_idx = torch.topk(step_scores, k=num_selected)
 
-        # Normalize selected step scores to [0, 1] as a step-level PNS proxy.
-        selected_scores = step_scores[topk_step_idx]
-        max_score = selected_scores.max() if selected_scores.numel() > 0 else torch.tensor(0.0, device=device, dtype=entropy.dtype)
-        denom = torch.clamp(max_score, min=1e-8)
-
         for idx in topk_step_idx:
             s_start, s_end = steps[idx.item()]
             result_mask[b, s_start:s_end] = 1
-            if return_step_pns:
-                step_pns = torch.clamp(step_scores[idx] / denom, min=0.0, max=1.0)
-                step_pns_token[b, s_start:s_end] = step_pns
 
-    if return_step_pns:
-        return result_mask, step_pns_token
     return result_mask
 
 def register_policy_loss(name: str) -> Callable[[PolicyLossFn], PolicyLossFn]:
@@ -1039,7 +1005,6 @@ def compute_policy_loss_vanilla(
     config: Optional[DictConfig | AlgoConfig] = None,
     rollout_is_weights: torch.Tensor | None = None,
     entropy_top_mask: torch.Tensor | None = None,
-    pns_token_bonus: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """
     Compute the clipped policy objective and related metrics for PPO.
@@ -1112,10 +1077,6 @@ def compute_policy_loss_vanilla(
     # Apply rollout importance sampling weights if provided
     if rollout_is_weights is not None:
         pg_losses = pg_losses * rollout_is_weights
-
-    # PNS_RLVR: token-level signed additional loss on selected step tokens.
-    if pns_token_bonus is not None:
-        pg_losses = pg_losses + pns_token_bonus
 
     if entropy_top_mask is None:
         pg_loss = agg_loss(loss_mat=pg_losses, loss_mask=response_mask, loss_agg_mode=loss_agg_mode)

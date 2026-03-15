@@ -135,11 +135,30 @@ class ActorConfig(BaseConfig):
     # - "batch": select top tokens globally across the mini-batch.
     entropy_top_scope: str = "rollout"
 
-    # PNS_RLVR: enable step-level PNS-weighted additional policy loss.
+    # PNS_RLVR: enable real PNS (Process Necessity Score) ablation testing.
+    # When enabled, high-entropy steps are tested via counterfactual rollouts
+    # and the resulting PNS values are added to the advantage as auxiliary reward.
     pns_rlvr_enable: bool = False
 
-    # PNS_RLVR: additional loss scale lambda.
-    pns_lambda: float = 0.0
+    # PNS_RLVR: scaling factor for PNS bonus added to advantage.
+    pns_lambda: float = 0.5
+
+    # PNS_RLVR: number of counterfactual rollouts per ablation task.
+    pns_num_rollouts: int = 5
+
+    # PNS_RLVR: ratio controlling how many steps to test in each batch.
+    # Total steps tested = batch_size * rollout_n * pns_step_ratio.
+    # E.g. 0.5 means test half-batch-worth of steps.
+    pns_step_ratio: float = 0.5
+
+    # PNS_RLVR: max prompts per ablation vLLM generate call.
+    # Controls sub-batching to avoid OOM during ablation rollouts.
+    pns_ablation_batch_size: int = 64
+
+    # PNS_RLVR: dry-run mode. When True, PNS pipeline runs and logs all
+    # metrics/details, but does NOT inject bonus into advantage.
+    # Use this for DAPO control groups to observe PNS without affecting training.
+    pns_dry_run: bool = False
 
     def __post_init__(self):
         """Validate actor configuration parameters."""
@@ -172,6 +191,12 @@ class ActorConfig(BaseConfig):
 
         if self.pns_lambda < 0:
             raise ValueError(f"pns_lambda must be >= 0, got {self.pns_lambda}")
+
+        if self.pns_num_rollouts < 1:
+            raise ValueError(f"pns_num_rollouts must be >= 1, got {self.pns_num_rollouts}")
+
+        if not (0 < self.pns_step_ratio <= 10.0):
+            raise ValueError(f"pns_step_ratio must be in (0, 10.0], got {self.pns_step_ratio}")
 
     def validate(self, n_gpus: int, train_batch_size: int, model_config: dict = None):
         """Validate actor configuration with runtime parameters."""

@@ -69,6 +69,10 @@ actor_rollout_ref:
     entropy_top_scope: rollout # rollout or batch
     pns_rlvr_enable: false
     pns_lambda: 0.0
+    pns_num_rollouts: 5
+    pns_step_ratio: 0.5
+    pns_ablation_batch_size: 64
+    pns_dry_run: false
     freeze_vision_tower: false
     policy_loss:
       _target_: verl.workers.config.PolicyLossConfig

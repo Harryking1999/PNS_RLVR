@@ -1,14 +1,21 @@
 #!/usr/bin/env bash
 
-# Step Forking DAPO: Qwen3-1.7B-Base on 4x H100 (80GB) GPUs
+# DAPO + PNS_RLVR (无 Step Forking): Qwen3-1.7B-Base on 4x H100 (80GB) GPUs
 #
-# 基于 forking DAPO 扩展: 先用 entropy_top_ratio 识别高熵 token，
-# 再按换行/句末标点切分步骤，为每个步骤打分（步骤内高熵 token 的熵之和），
-# 最终只在 top step_entropy_top_ratio 比例的步骤上计算梯度。
+# 纯 DAPO 训练 + 真正 PNS 干预:
+#   - 所有 response token 正常参与 DAPO policy loss（无 entropy masking）
+#   - PNS 在 advantage 计算之后，对高熵步骤做 counterfactual ablation
+#   - PNS bonus 加性注入 advantage，不影响其他 token 的梯度
 #
-# 关键参数:
-#   entropy_top_ratio      = 0.2   (步骤打分用: 每个步骤内取 top 20% 高熵 token)
-#   step_entropy_top_ratio = 0.1   (步骤筛选用: 全局选 top 10% 高熵步骤)
+# PNS 核心参数:
+#   pns_rlvr_enable         = True   (启用 PNS)
+#   pns_lambda              = 0.5    (PNS bonus 缩放因子)
+#   pns_num_rollouts        = 5      (每个干预任务的 rollout 数)
+#   pns_step_ratio          = 0.5    (batch 中 PNS 测试步数 = B * ratio)
+#   pns_ablation_batch_size = 64     (每次 vLLM 调用的最大 ablation prompt 数)
+#
+# 注意: 不设 entropy_top_ratio / step_entropy_top_ratio，
+#       PNS 内部自动使用默认值 (0.2 / 0.1) 做步骤选择。
 
 set -xeuo pipefail
 
@@ -23,7 +30,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 project_name='DAPO'
-exp_name='RLVR-Qwen3-1.7B-step-forking-DAPO-0.3'
+exp_name='RLVR-Qwen3-1.7B-DAPO-PNS'
 
 adv_estimator=grpo
 
@@ -48,15 +55,12 @@ enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
 
-# ====== Step Forking DAPO 核心超参 ======
-entropy_top_ratio=0.2          # 每个步骤内 top 20% 高熵 token 用于步骤打分
-step_entropy_top_ratio=0.3     # 全局选 top 30% 高熵步骤做梯度下降
-
 # ====== PNS_RLVR: 真正 PNS 干预实验 ======
-pns_rlvr_enable=False          # 是否启用 PNS 辅助奖励
+pns_rlvr_enable=True           # 启用 PNS 辅助奖励
 pns_lambda=0.5                 # PNS bonus 缩放因子
 pns_num_rollouts=5             # 每个干预任务的 rollout 数
 pns_step_ratio=0.5             # batch 中 PNS 测试步数 = B * pns_step_ratio
+pns_ablation_batch_size=64     # 每次 vLLM 调用的最大 ablation prompt 数
 
 # ====== Batch sizes (针对4卡H100调整) ======
 train_prompt_bsz=16
@@ -129,7 +133,8 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length)) \
+    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length + 1000)) \
+    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length + 1000)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
@@ -149,12 +154,11 @@ python3 -m recipe.dapo.main_dapo \
     trainer.val_before_train=False \
     trainer.test_freq=-1 \
     trainer.save_freq=200 \
-    trainer.total_epochs=3 \
+    trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
-    actor_rollout_ref.actor.entropy_top_ratio=${entropy_top_ratio} \
-    actor_rollout_ref.actor.step_entropy_top_ratio=${step_entropy_top_ratio} \
     actor_rollout_ref.actor.pns_rlvr_enable=${pns_rlvr_enable} \
     actor_rollout_ref.actor.pns_lambda=${pns_lambda} \
     actor_rollout_ref.actor.pns_num_rollouts=${pns_num_rollouts} \
-    actor_rollout_ref.actor.pns_step_ratio=${pns_step_ratio}
+    actor_rollout_ref.actor.pns_step_ratio=${pns_step_ratio} \
+    actor_rollout_ref.actor.pns_ablation_batch_size=${pns_ablation_batch_size}

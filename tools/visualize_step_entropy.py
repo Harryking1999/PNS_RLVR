@@ -29,6 +29,13 @@ from collections import Counter
 import numpy as np
 import pandas as pd
 
+try:
+    import torch
+    from transformers import AutoTokenizer, AutoModelForCausalLM
+    _HAS_TORCH = True
+except ImportError:
+    _HAS_TORCH = False
+
 
 # ──────────────────────────── ANSI colors ────────────────────────────
 
@@ -338,8 +345,6 @@ def visualize_steps(steps, step_scores, high_entropy_mask, token_entropies,
         is_sel = j in selected
         n_he = sum(1 for idx in step['token_indices'] if high_entropy_mask[idx])
         text = step['text'].replace('\n', '↵ ').strip()
-        if len(text) > 90:
-            text = text[:90] + "..."
 
         mark = f"{C.GREEN}✅{C.RESET}" if is_sel else "  "
         color = C.RED if is_sel else ""
@@ -429,8 +434,6 @@ def print_cross_ratio_comparison(results, step_top_ratio=0.2):
             for j in sorted(selected):
                 s = r['steps'][j]
                 text = s['text'].replace('\n', '↵ ').strip()
-                if len(text) > 100:
-                    text = text[:100] + "..."
                 print(f"      Step {j:>3} (score={scores[j]:>7.2f}): {text}")
 
 
@@ -551,8 +554,8 @@ def main():
             print(f"  {len(r['response_tokens'])} tokens -> {len(r['steps'])} steps")
     else:
         # ---- GPU mode: generate and compute entropy ----
-        import torch
-        from transformers import AutoTokenizer, AutoModelForCausalLM
+        if not _HAS_TORCH:
+            raise RuntimeError("torch/transformers not installed. Use --load_cache for CPU mode.")
 
         device = "cuda:0"
 

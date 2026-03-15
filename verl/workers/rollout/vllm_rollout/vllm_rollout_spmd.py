@@ -331,6 +331,10 @@ class vLLMRollout(BaseRollout):
 
         do_sample = prompts.meta_info.get("do_sample", True)
         is_validate = prompts.meta_info.get("validate", False)
+        # PNS_RLVR: allow overriding n for ablation rollouts
+        pns_num_rollouts = prompts.meta_info.get("pns_num_rollouts", None)
+        if pns_num_rollouts is not None and pns_num_rollouts > 1:
+            kwargs["n"] = pns_num_rollouts
         if not do_sample:
             kwargs = {
                 "best_of": 1,
@@ -390,6 +394,18 @@ class vLLMRollout(BaseRollout):
                     rollout_log_probs, -1, max_length=self.config.response_length
                 ).to(idx.device)
                 rollout_log_probs = rollout_log_probs.to(torch.float32)
+
+            # PNS_RLVR: when n > 1 (ablation rollouts), response has batch_size * n rows
+            # but idx/attention_mask/position_ids still have batch_size rows.
+            # Repeat prompt tensors to match.
+            actual_n = response.size(0) // batch_size
+            if actual_n > 1:
+                idx = idx.repeat_interleave(actual_n, dim=0)
+                attention_mask = attention_mask.repeat_interleave(actual_n, dim=0)
+                position_ids = position_ids.repeat_interleave(actual_n, dim=0)
+                batch_size = idx.size(0)
+                if self.config.calculate_log_probs and rollout_log_probs.size(0) != batch_size:
+                    pass  # rollout_log_probs already has batch_size * n rows
 
             seq = torch.cat([idx, response], dim=-1)
 

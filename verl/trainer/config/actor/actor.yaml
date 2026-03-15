@@ -44,6 +44,10 @@ step_entropy_top_ratio: null # Step Forking DAPO: fraction of top high-entropy s
 entropy_top_scope: rollout # rollout or batch
 pns_rlvr_enable: false
 pns_lambda: 0.0
+pns_num_rollouts: 5
+pns_step_ratio: 0.5
+pns_ablation_batch_size: 64
+pns_dry_run: false
 
 # Whether to freeze vision model, if set true, it will be freeze vision model
 freeze_vision_tower: false

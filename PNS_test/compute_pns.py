@@ -443,12 +443,16 @@ def phase1_generate_correct(args, phase1_path):
     elapsed = time.time() - t0
     print(f"  Generated in {elapsed:.1f}s")
 
-    # Find first correct response for each problem
+    # Find first correct (or incorrect for reverse mode) response for each problem
     correct_data = []
+    target_correct = not getattr(args, 'reverse', False)  # True for normal, False for reverse
+    mode_label = "Correct" if target_correct else "Incorrect"
+
     for i, (prob, output) in enumerate(zip(problems, outputs)):
         for out in output.outputs:
             result = compute_score(out.text, prob["answer"])
-            if bool(result["acc"]):
+            is_correct = bool(result["acc"])
+            if is_correct == target_correct:
                 correct_data.append({
                     "id": prob["id"],
                     "problem": prob["problem"],
@@ -459,7 +463,7 @@ def phase1_generate_correct(args, phase1_path):
                 })
                 break
 
-    print(f"  Correct responses: {len(correct_data)}/{len(problems)} "
+    print(f"  {mode_label} responses: {len(correct_data)}/{len(problems)} "
           f"({len(correct_data)/len(problems)*100:.1f}%)")
 
     with open(phase1_path, "w") as f:
@@ -739,7 +743,13 @@ def phase3_ablation_rollouts(args, step_data, phase3_path):
             })
 
         n_correct = sum(1 for r in rollout_results if r["correct"])
-        pns = 1.0 - n_correct / args.num_rollouts
+        if getattr(args, 'reverse', False):
+            # Reverse PNS: how often does removing this step FIX the answer?
+            # High reverse_pns → this step was the culprit causing failure
+            pns = n_correct / args.num_rollouts
+        else:
+            # Normal PNS: how often does removing this step BREAK the answer?
+            pns = 1.0 - n_correct / args.num_rollouts
 
         prefix_tl = task["prefix_token_len"]
         avg_gen_len = sum(r["response_len"] for r in rollout_results) / len(rollout_results)
@@ -794,9 +804,11 @@ def phase3_ablation_rollouts(args, step_data, phase3_path):
 
 def phase4_analysis(args, step_data, ablation_results, analysis_path):
     """Phase 4: Compute and display PNS analysis."""
+    is_reverse = getattr(args, 'reverse', False)
+    pns_label = "Reverse PNS" if is_reverse else "PNS"
 
     print(f"\n{'='*60}")
-    print(f"Phase 4: PNS Analysis")
+    print(f"Phase 4: {pns_label} Analysis")
     print(f"{'='*60}")
 
     if len(ablation_results) == 0:
@@ -817,8 +829,10 @@ def phase4_analysis(args, step_data, ablation_results, analysis_path):
             "entropy_top_ratio": args.entropy_top_ratio,
             "step_entropy_top_ratio": args.step_entropy_top_ratio,
             "test_all_steps": args.test_all_steps,
+            "reverse": is_reverse,
         },
         "summary": {
+            "mode": "reverse_pns" if is_reverse else "pns",
             "num_problems_with_correct": len(step_data),
             "num_steps_tested": len(ablation_results),
             "num_high_entropy_tested": int(he_mask.sum()),
@@ -1028,6 +1042,10 @@ def main():
                              "correlation analysis")
     parser.add_argument("--output_dir", type=str, default=None,
                         help="Output directory (default: auto from model name)")
+    parser.add_argument("--reverse", action="store_true",
+                        help="Reverse PNS mode: analyze INCORRECT paths to find "
+                             "misleading steps (reverse_pns = how often removing "
+                             "a step fixes the answer)")
     parser.add_argument("--resume", action="store_true",
                         help="Resume from previous run (skip completed phases)")
     parser.add_argument("--seed", type=int, default=42)
@@ -1039,11 +1057,12 @@ def main():
         args.output_dir = f"/ssdwork/fuzhizhang/pns_results/{model_name}"
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # File paths
-    phase1_path = os.path.join(args.output_dir, "phase1_correct_responses.json")
-    phase2_path = os.path.join(args.output_dir, "phase2_entropy_steps.json")
-    phase3_path = os.path.join(args.output_dir, "phase3_ablation_rollouts.json")
-    analysis_path = os.path.join(args.output_dir, "pns_analysis.json")
+    # File paths (reverse mode uses separate files to avoid overwriting)
+    prefix = "reverse_" if args.reverse else ""
+    phase1_path = os.path.join(args.output_dir, f"{prefix}phase1_correct_responses.json")
+    phase2_path = os.path.join(args.output_dir, f"{prefix}phase2_entropy_steps.json")
+    phase3_path = os.path.join(args.output_dir, f"{prefix}phase3_ablation_rollouts.json")
+    analysis_path = os.path.join(args.output_dir, f"{prefix}pns_analysis.json")
 
     # Save config
     config_path = os.path.join(args.output_dir, "config.json")
