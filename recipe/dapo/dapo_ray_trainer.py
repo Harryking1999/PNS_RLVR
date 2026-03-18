@@ -336,52 +336,59 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # PNS_RLVR: compute real PNS via counterfactual ablation rollouts
                     pns_enable = self.config.actor_rollout_ref.actor.get("pns_rlvr_enable", False)
                     if pns_enable and self._pns_boundary_lookup is not None:
-                        with marked_timer("pns_ablation", timing_raw, "magenta"):
-                            actor_cfg = self.config.actor_rollout_ref.actor
-                            _etr = actor_cfg.get("entropy_top_ratio", None)
-                            pns_config = {
-                                "pns_lambda": float(actor_cfg.get("pns_lambda", 0.5)),
-                                "pns_num_rollouts": int(actor_cfg.get("pns_num_rollouts", 5)),
-                                "pns_step_ratio": float(actor_cfg.get("pns_step_ratio", 0.5)),
-                                "pns_dry_run": bool(actor_cfg.get("pns_dry_run", False)),
-                                "token_top_ratio": float(_etr) if _etr is not None else 0.2,
-                                "step_top_ratio": 1.0,
-                                "token_top_scope": str(actor_cfg.get("entropy_top_scope", "rollout")),
-                                "max_prompt_length": int(
-                                    self.config.data.get("max_prompt_length", 2048)
-                                ),
-                                "max_response_length": int(
-                                    self.config.actor_rollout_ref.rollout.get("response_length", 4096)
-                                ),
-                                "pns_ablation_batch_size": int(
-                                    actor_cfg.get("pns_ablation_batch_size", 64)
-                                ),
-                            }
+                        try:
+                            with marked_timer("pns_ablation", timing_raw, "magenta"):
+                                actor_cfg = self.config.actor_rollout_ref.actor
+                                _etr = actor_cfg.get("entropy_top_ratio", None)
+                                pns_config = {
+                                    "pns_lambda": float(actor_cfg.get("pns_lambda", 0.5)),
+                                    "pns_num_rollouts": int(actor_cfg.get("pns_num_rollouts", 5)),
+                                    "pns_step_ratio": float(actor_cfg.get("pns_step_ratio", 0.5)),
+                                    "pns_dry_run": bool(actor_cfg.get("pns_dry_run", False)),
+                                    "token_top_ratio": float(_etr) if _etr is not None else 0.2,
+                                    "step_top_ratio": 1.0,
+                                    "token_top_scope": str(actor_cfg.get("entropy_top_scope", "rollout")),
+                                    "max_prompt_length": int(
+                                        self.config.data.get("max_prompt_length", 2048)
+                                    ),
+                                    "max_response_length": int(
+                                        self.config.actor_rollout_ref.rollout.get("response_length", 4096)
+                                    ),
+                                    "pns_ablation_batch_size": int(
+                                        actor_cfg.get("pns_ablation_batch_size", 64)
+                                    ),
+                                }
 
-                            def pns_generate_fn(ablation_batch, pns_num_rollouts=5):
-                                """Wrapper to call rollout engine with n rollouts per prompt."""
-                                ablation_batch.meta_info["pns_num_rollouts"] = pns_num_rollouts
-                                size_divisor = self.actor_rollout_wg.world_size
-                                ablation_batch_padded, pad_size = pad_dataproto_to_divisor(
-                                    ablation_batch, size_divisor
+                                def pns_generate_fn(ablation_batch, pns_num_rollouts=5):
+                                    """Wrapper to call rollout engine with n rollouts per prompt."""
+                                    ablation_batch.meta_info["pns_num_rollouts"] = pns_num_rollouts
+                                    size_divisor = self.actor_rollout_wg.world_size
+                                    ablation_batch_padded, pad_size = pad_dataproto_to_divisor(
+                                        ablation_batch, size_divisor
+                                    )
+                                    output = self.actor_rollout_wg.generate_sequences(ablation_batch_padded)
+                                    output.meta_info.pop("timing", None)
+                                    actual_pad = pad_size * pns_num_rollouts
+                                    output = unpad_dataproto(output, pad_size=actual_pad)
+                                    return output
+
+                                advantages, pns_metrics = compute_pns_for_batch(
+                                    batch=batch,
+                                    entropy=batch_entropys,
+                                    boundary_lookup=self._pns_boundary_lookup,
+                                    tokenizer=self.tokenizer,
+                                    compute_score_fn=self.reward_fn.compute_score,
+                                    generate_fn=pns_generate_fn,
+                                    config=pns_config,
                                 )
-                                output = self.actor_rollout_wg.generate_sequences(ablation_batch_padded)
-                                output.meta_info.pop("timing", None)
-                                actual_pad = pad_size * pns_num_rollouts
-                                output = unpad_dataproto(output, pad_size=actual_pad)
-                                return output
-
-                            advantages, pns_metrics = compute_pns_for_batch(
-                                batch=batch,
-                                entropy=batch_entropys,
-                                boundary_lookup=self._pns_boundary_lookup,
-                                tokenizer=self.tokenizer,
-                                compute_score_fn=self.reward_fn.compute_score,
-                                generate_fn=pns_generate_fn,
-                                config=pns_config,
-                            )
-                            batch.batch["advantages"] = advantages
-                            metrics.update(pns_metrics)
+                                batch.batch["advantages"] = advantages
+                                metrics.update(pns_metrics)
+                        except Exception as e:
+                            import traceback
+                            print(f"[PNS] WARNING: PNS computation failed, skipping this step. "
+                                  f"Error: {e}")
+                            traceback.print_exc()
+                            metrics["pns/skipped"] = 1.0
 
                     # update critic
                     if self.use_critic:

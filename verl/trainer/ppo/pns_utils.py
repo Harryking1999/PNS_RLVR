@@ -19,6 +19,10 @@ PNS definition:
 """
 
 import logging
+import multiprocessing
+import os
+import queue
+import time
 from typing import Optional
 
 import numpy as np
@@ -27,6 +31,136 @@ import torch
 from verl import DataProto
 
 logger = logging.getLogger(__name__)
+
+_SCORE_TIMEOUT_COUNT = 0
+
+
+def _pns_score_worker(result_queue, compute_score_fn, data_source, solution_str, ground_truth):
+    """Top-level worker function for process-based scoring timeout.
+
+    Must be defined at module level so it is picklable for all multiprocessing
+    start methods (fork/forkserver/spawn).
+    """
+    try:
+        result = compute_score_fn(
+            data_source=data_source,
+            solution_str=solution_str,
+            ground_truth=ground_truth,
+            extra_info={},
+        )
+        result_queue.put((True, result))
+    except Exception as e:
+        result_queue.put((False, repr(e)))
+
+
+def compute_score_with_timeout(compute_score_fn, data_source, solution_str, ground_truth, timeout=15):
+    """Call compute_score_fn with a process-based timeout.
+
+    Previous implementation used a daemon thread, which had two critical flaws:
+      1. Python threads cannot be killed — a timed-out thread stays alive forever,
+         leaking memory and potentially spawning child processes in the background.
+      2. signal.SIGALRM (used by naive_dapo.are_equal_under_sympy's @timeout
+         decorator) only works in the main thread. In a daemon thread it raises
+         ValueError, silently breaking the sympy timeout and causing incorrect
+         scores (not just timeouts).
+
+    This version uses multiprocessing.Process:
+      - The child process CAN be killed (SIGTERM/SIGKILL) on timeout.
+      - signal.SIGALRM works in the child (it is the child's main thread).
+      - All memory allocated by the child is freed by the OS on kill.
+      - Detailed diagnostics are logged on timeout for debugging.
+    """
+    global _SCORE_TIMEOUT_COUNT
+
+    q = multiprocessing.Queue(maxsize=1)
+    proc = multiprocessing.Process(
+        target=_pns_score_worker,
+        args=(q, compute_score_fn, data_source, solution_str, ground_truth),
+    )
+    t0 = time.monotonic()
+    proc.start()
+    proc.join(timeout=timeout)
+
+    if proc.is_alive():
+        # ── Timeout: collect diagnostics BEFORE killing ──
+        _SCORE_TIMEOUT_COUNT += 1
+        diag = ""
+        try:
+            import psutil
+
+            parent_rss = psutil.Process(os.getpid()).memory_info().rss / (1024**3)
+            child_rss = psutil.Process(proc.pid).memory_info().rss / (1024**3)
+            sys_mem = psutil.virtual_memory()
+            diag = (
+                f"parent_rss={parent_rss:.1f}GB "
+                f"child_rss={child_rss:.1f}GB "
+                f"sys_used={sys_mem.used / (1024**3):.1f}GB/"
+                f"{sys_mem.total / (1024**3):.1f}GB "
+                f"sys_avail={sys_mem.available / (1024**3):.1f}GB"
+            )
+        except Exception:
+            diag = "(diagnostics unavailable)"
+
+        logger.warning(
+            f"[PNS] compute_score timed out after {timeout}s "
+            f"(total timeouts: {_SCORE_TIMEOUT_COUNT}), marking as incorrect. "
+            f"data_source={data_source!r} "
+            f"solution_len={len(solution_str)} "
+            f"gt={ground_truth!r:.80s} "
+            f"{diag}"
+        )
+
+        # Kill the child process
+        proc.terminate()
+        proc.join(timeout=2.0)
+        if proc.is_alive():
+            proc.kill()
+            proc.join(timeout=1.0)
+            if proc.is_alive():
+                logger.error(f"[PNS] Scoring child process {proc.pid} did not die after SIGKILL!")
+        try:
+            q.close()
+            q.join_thread()
+        except Exception:
+            pass
+        return 0.0
+
+    # ── Process finished within timeout ──
+    elapsed = time.monotonic() - t0
+    try:
+        success, result = q.get(timeout=0.5)
+    except queue.Empty:
+        exitcode = proc.exitcode
+        logger.warning(
+            f"[PNS] compute_score child exited (code={exitcode}) but returned no result "
+            f"after {elapsed:.1f}s, marking as incorrect. "
+            f"data_source={data_source!r} solution_len={len(solution_str)}"
+        )
+        try:
+            q.close()
+            q.join_thread()
+        except Exception:
+            pass
+        return 0.0
+
+    try:
+        q.close()
+        q.join_thread()
+    except Exception:
+        pass
+
+    if not success:
+        # result contains the repr of the exception from the child
+        return 0.0
+
+    # Log slow (but successful) scoring calls for awareness
+    if elapsed > 5.0:
+        logger.info(
+            f"[PNS] compute_score slow but succeeded in {elapsed:.1f}s "
+            f"(data_source={data_source!r}, solution_len={len(solution_str)})"
+        )
+
+    return result
 
 # ──────────────── Counterfactual prompt templates ────────────────
 
@@ -467,11 +601,8 @@ def score_ablation_rollouts(
         for ri in range(start_row, end_row):
             response_text = all_response_texts[ri]
             try:
-                result = compute_score_fn(
-                    data_source=data_source,
-                    solution_str=response_text,
-                    ground_truth=ground_truth,
-                    extra_info={},
+                result = compute_score_with_timeout(
+                    compute_score_fn, data_source, response_text, ground_truth, timeout=15
                 )
                 if isinstance(result, dict):
                     score = result.get("score", result.get("acc", 0.0))

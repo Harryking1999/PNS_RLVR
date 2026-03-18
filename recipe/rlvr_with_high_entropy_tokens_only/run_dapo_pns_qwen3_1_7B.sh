@@ -26,6 +26,12 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 export RAY_TMPDIR=/home/fuzhizhang.fzz/ray
 mkdir -p "$RAY_TMPDIR"
 
+# 增大 Ray gRPC 超时，防止长时间 generation/PNS 导致 actor unavailable
+export RAY_grpc_keepalive_time_ms=60000        # 每 60s 发一次 keepalive ping
+export RAY_grpc_keepalive_timeout_ms=900000    # ping 后等 15min 才判超时
+export RAY_health_check_period_ms=120000       # 每 2min 做一次 health check
+export RAY_health_check_timeout_ms=900000      # health check 等 15min 才判 actor dead
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 

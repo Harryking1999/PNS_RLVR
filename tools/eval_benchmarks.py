@@ -47,7 +47,7 @@ def _compute_score_worker(q, text, answer):
         q.put({"score": 0.0, "acc": False})
 
 
-def compute_score_safe(text: str, answer: str, timeout_seconds: int = 60) -> dict:
+def compute_score_safe(text: str, answer: str, timeout_seconds: int = 15) -> dict:
     """Wrapper around compute_score with process-level timeout.
     
     sympy.simplify() can hang forever in C code where signal-based timeouts

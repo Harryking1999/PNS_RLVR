@@ -110,9 +110,12 @@ def timeout_limit(seconds: float, use_signals: bool = False):
 
                 if process.is_alive():
                     process.terminate()
-                    process.join(timeout=0.5)  # Give it a moment to terminate
+                    process.join(timeout=1.0)  # Give it a moment to terminate
                     if process.is_alive():
-                        print(f"Warning: Process {process.pid} did not terminate gracefully after timeout.")
+                        process.kill()  # Force kill if SIGTERM didn't work (e.g. stuck in C code)
+                        process.join(timeout=1.0)
+                        if process.is_alive():
+                            print(f"Warning: Process {process.pid} did not die even after SIGKILL.")
                     # Update function name in error message if needed (optional but good practice)
                     raise TimeoutError(f"Function {func.__name__} timed out after {seconds} seconds (multiprocessing)!")
 

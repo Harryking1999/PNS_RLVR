@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 
-# DAPO + PNS_RLVR DRY-RUN (对照组): Qwen3-1.7B-Base on 4x H100 (80GB) GPUs
+# DAPO baseline: DeepSeek-R1-Distill-Qwen-1.5B on 4x H100 (80GB) GPUs
 #
-# 纯 DAPO 训练，PNS 只做观测不干预:
-#   - 所有 response token 正常参与 DAPO policy loss
-#   - PNS 完整 pipeline 运行（选步骤、构建干预 prompt、跑 ablation、打分）
-#   - 但 pns_dry_run=True：PNS bonus 不注入 advantage，训练完全等价于纯 DAPO
-#   - 所有 PNS 指标和 per-candidate 详情都会输出到日志和 wandb
+# 纯 DAPO 训练（无 PNS），作为 PNS-DAPO 的对照组
 #
-# 用途: 作为 DAPO 对照组，观察 PNS 信号质量，不影响训练曲线
+# 与 Qwen3-1.7B 版本的主要区别:
+#   - 模型: DeepSeek-R1-Distill-Qwen-1.5B (蒸馏模型，生成更长)
+#   - max_response_length: 8192 (蒸馏模型不需要 16K)
+#   - temperature: 0.6 (蒸馏模型已学会 CoT，不需要高温探索)
+#   - top_p: 0.9
 
 set -xeuo pipefail
 
@@ -19,17 +19,17 @@ export CUDA_VISIBLE_DEVICES=4,5,6,7
 export RAY_TMPDIR=/home/fuzhizhang.fzz/ray
 mkdir -p "$RAY_TMPDIR"
 
-# 增大 Ray gRPC 超时，防止长时间 generation/PNS 导致 actor unavailable
-export RAY_grpc_keepalive_time_ms=60000        # 每 60s 发一次 keepalive ping
-export RAY_grpc_keepalive_timeout_ms=900000    # ping 后等 15min 才判超时
-export RAY_health_check_period_ms=120000       # 每 2min 做一次 health check
-export RAY_health_check_timeout_ms=900000      # health check 等 15min 才判 actor dead
+# 增大 Ray gRPC 超时，防止长时间 generation 导致 actor unavailable
+export RAY_grpc_keepalive_time_ms=60000
+export RAY_grpc_keepalive_timeout_ms=900000
+export RAY_health_check_period_ms=120000
+export RAY_health_check_timeout_ms=900000
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 
 project_name='DAPO'
-exp_name='RLVR-Qwen3-1.7B-DAPO-PNS-dryrun'
+exp_name='RLVR-R1-Distill-1.5B-DAPO'
 
 adv_estimator=grpo
 
@@ -41,11 +41,11 @@ kl_loss_coef=0.0
 clip_ratio_low=0.2
 clip_ratio_high=0.28
 
-# 序列长度设置
+# 序列长度设置 (蒸馏模型用 8192)
 max_prompt_length=$((1024 * 2))      # 2048
-max_response_length=$((1024 * 16))   # 16384
+max_response_length=$((1024 * 8))    # 8192
 enable_overlong_buffer=True
-overlong_buffer_len=$((1024 * 4))
+overlong_buffer_len=$((1024 * 2))    # 2048 (按比例缩小)
 overlong_penalty_factor=1.0
 
 loss_agg_mode="token-mean"
@@ -54,14 +54,6 @@ enable_filter_groups=True
 filter_groups_metric=acc
 max_num_gen_batches=10
 
-# ====== PNS_RLVR: dry-run 模式（只观测，不干预训练） ======
-pns_rlvr_enable=True           # 启用 PNS pipeline
-pns_lambda=0.5                 # PNS bonus 缩放因子（dry-run 下不实际注入）
-pns_num_rollouts=5             # 每个干预任务的 rollout 数
-pns_step_ratio=0.5             # batch 中 PNS 测试步数 = B * pns_step_ratio
-pns_ablation_batch_size=64     # 每次 vLLM 调用的最大 ablation prompt 数
-pns_dry_run=True               # dry-run: 跑 PNS 但不注入 advantage
-
 # ====== Batch sizes (针对4卡H100调整) ======
 train_prompt_bsz=16
 gen_prompt_bsz=$((train_prompt_bsz * 4))  # 64
@@ -69,26 +61,26 @@ n_resp_per_prompt=8
 train_prompt_mini_bsz=4
 
 # ====== Paths ======
-MODEL_PATH="/home/fuzhizhang.fzz/model/Qwen3-1.7B-Base"
+MODEL_PATH="/home/fuzhizhang.fzz/model/DeepSeek-R1-Distill-Qwen-1.5B"
 TRAIN_FILE="/home/fuzhizhang.fzz/data/math_combined_54k/math__combined_54.4k.parquet"
 CKPTS_DIR="/ssdwork/fuzhizhang/ckpts/${project_name}/${exp_name}"
 VAL_AIME_FILE="/home/fuzhizhang.fzz/data/math__aime_repeated_32x_960.parquet"
 VAL_MATH500_FILE="/home/fuzhizhang.fzz/data/math__math_500.parquet"
 VAL_FILES="['${VAL_AIME_FILE}', '${VAL_MATH500_FILE}']"
 
-# Algorithm
-temperature=1.0
-top_p=1.0
-top_k=-1  # 0 for HF rollout, -1 for vLLM rollout
+# Algorithm (蒸馏模型用较低温度)
+temperature=0.6
+top_p=0.9
+top_k=-1  # -1 for vLLM rollout
 val_top_p=0.7
 
-# ====== Performance (针对1.7B + 4卡H100优化) ======
-sp_size=1              # 1.7B模型不需要序列并行
+# ====== Performance (针对1.5B + 4卡H100优化) ======
+sp_size=1
 use_dynamic_bsz=True
 actor_ppo_max_token_len=$((max_prompt_length + max_response_length))
 infer_ppo_max_token_len=$((max_prompt_length + max_response_length))
-offload=False          # 1.7B模型很小, 不需要CPU offload
-gen_tp=1               # 1.7B模型单卡即可推理, gen_tp=1 最大化生成并行度
+offload=False
+gen_tp=1
 
 python3 -m recipe.dapo.main_dapo \
     data.train_files="${TRAIN_FILE}" \
@@ -133,8 +125,8 @@ python3 -m recipe.dapo.main_dapo \
     actor_rollout_ref.rollout.gpu_memory_utilization=0.85 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=${gen_tp} \
     actor_rollout_ref.rollout.enable_chunked_prefill=True \
-    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length + 2000)) \
-    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length + 2000)) \
+    actor_rollout_ref.rollout.max_model_len=$((max_prompt_length + max_response_length + 1000)) \
+    actor_rollout_ref.rollout.max_num_batched_tokens=$((max_prompt_length + max_response_length + 1000)) \
     actor_rollout_ref.rollout.temperature=${temperature} \
     actor_rollout_ref.rollout.top_p=${top_p} \
     actor_rollout_ref.rollout.top_k="${top_k}" \
@@ -156,10 +148,4 @@ python3 -m recipe.dapo.main_dapo \
     trainer.save_freq=200 \
     trainer.total_epochs=1 \
     trainer.default_local_dir="${CKPTS_DIR}" \
-    trainer.resume_mode=auto \
-    actor_rollout_ref.actor.pns_rlvr_enable=${pns_rlvr_enable} \
-    actor_rollout_ref.actor.pns_lambda=${pns_lambda} \
-    actor_rollout_ref.actor.pns_num_rollouts=${pns_num_rollouts} \
-    actor_rollout_ref.actor.pns_step_ratio=${pns_step_ratio} \
-    actor_rollout_ref.actor.pns_ablation_batch_size=${pns_ablation_batch_size} \
-    actor_rollout_ref.actor.pns_dry_run=${pns_dry_run}
+    trainer.resume_mode=auto
