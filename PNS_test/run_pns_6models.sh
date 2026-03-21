@@ -98,7 +98,7 @@ for i in "${!MODELS[@]}"; do
 
     echo ""
     echo "  ✅ Completed ${MODEL_NAME}"
-    echo "  Results: /ssdwork/fuzhizhang/pns_results/${MODEL_NAME}/"
+    echo "  Results: /home/fuzhizhang.fzz/model/merge_models/pns_results/${MODEL_NAME}/"
     echo ""
 done
 
@@ -109,7 +109,7 @@ echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  PNS 估算完成"
 echo "  成功: ${SUCCESS}/${TOTAL}  失败: ${FAILED}/${TOTAL}"
-echo "  结果目录: /ssdwork/fuzhizhang/pns_results/"
+echo "  结果目录: /home/fuzhizhang.fzz/model/merge_models/pns_results/"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "后续步骤: 运行汇总对比脚本"

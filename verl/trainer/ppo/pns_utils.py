@@ -373,10 +373,45 @@ def select_pns_steps(
                 "acc": float(acc[b]) if b < len(acc) else 0.0,
             })
 
-    # Step 3: globally select top candidates by entropy_score
+    # Step 3: select top candidates with 50/50 pos/neg quota
+    # Split candidates by acc to ensure both positive and negative samples
+    # get fair representation, preventing high-entropy negative steps from
+    # crowding out all positive steps in the global ranking.
     if len(all_candidates) > max_steps_per_batch:
-        all_candidates.sort(key=lambda c: c["entropy_score"], reverse=True)
-        all_candidates = all_candidates[:max_steps_per_batch]
+        pos_candidates = [c for c in all_candidates if c["acc"] > 0]
+        neg_candidates = [c for c in all_candidates if c["acc"] <= 0]
+
+        # 50/50 split, with fallback: if one group has fewer than its quota,
+        # give the remaining slots to the other group.
+        half = max_steps_per_batch // 2
+        pos_candidates.sort(key=lambda c: c["entropy_score"], reverse=True)
+        neg_candidates.sort(key=lambda c: c["entropy_score"], reverse=True)
+
+        if len(pos_candidates) <= half:
+            # Not enough positive: take all pos, fill rest with neg
+            selected_pos = pos_candidates
+            remaining = max_steps_per_batch - len(selected_pos)
+            selected_neg = neg_candidates[:remaining]
+        elif len(neg_candidates) <= half:
+            # Not enough negative: take all neg, fill rest with pos
+            selected_neg = neg_candidates
+            remaining = max_steps_per_batch - len(selected_neg)
+            selected_pos = pos_candidates[:remaining]
+        else:
+            # Both have enough: take half from each
+            selected_pos = pos_candidates[:half]
+            selected_neg = neg_candidates[:half]
+            # If max_steps_per_batch is odd, give the extra slot to neg
+            if len(selected_pos) + len(selected_neg) < max_steps_per_batch:
+                extra = max_steps_per_batch - len(selected_pos) - len(selected_neg)
+                selected_neg = neg_candidates[:half + extra]
+
+        all_candidates = selected_pos + selected_neg
+        logger.info(
+            f"[PNS] Step selection quota: {len(selected_pos)} pos + "
+            f"{len(selected_neg)} neg = {len(all_candidates)} "
+            f"(from {len(pos_candidates)} pos / {len(neg_candidates)} neg candidates)"
+        )
 
     return all_candidates
 
@@ -546,6 +581,7 @@ def score_ablation_rollouts(
     tokenizer,
     compute_score_fn,
     num_rollouts: int,
+    pos_redundant_scale: float = 0.2,
 ) -> list[dict]:
     """Score ablation rollout outputs and compute PNS for each candidate step.
 
@@ -558,6 +594,10 @@ def score_ablation_rollouts(
             (data_source, solution_str, ground_truth, extra_info) -> float|dict.
             This is RewardManager.compute_score, NOT the RewardManager itself.
         num_rollouts: N rollouts per ablation task.
+        pos_redundant_scale: scaling factor for redundant positive steps (PNS < 0.5).
+            Controls how much to penalize steps in correct answers that are not essential.
+            Default 0.2: bonus at PNS=0 is -0.1 instead of -0.5.
+            Set to 1.0 for original behavior, 0.0 to never penalize redundant steps.
 
     Returns:
         candidates list updated with 'pns_value' and 'pns_bonus' keys.
@@ -617,7 +657,10 @@ def score_ablation_rollouts(
         if acc > 0:
             # Positive sample: PNS = 1 - n_correct/N
             pns = 1.0 - n_correct / num_rollouts
-            # Shift so PNS < 0.5 is punished, PNS > 0.5 is rewarded
+            # bonus ∈ [-0.5, 0.5]: PNS<0.5 penalizes redundant, PNS>0.5 rewards essential.
+            # The injection uses relative scaling (proportional to |advantage|),
+            # so the penalty/reward is always a fixed % of advantage, avoiding
+            # the collapse caused by fixed absolute injection.
             bonus = pns - 0.5
         else:
             # Negative sample: PNS = -(n_correct/N)
@@ -675,9 +718,14 @@ def inject_pns_into_advantage(
         pns = cand["pns_value"]
 
         # Add bonus to all tokens in this step (skip in dry_run)
+        # Use relative scaling: injection is proportional to |advantage| at each token,
+        # so PNS always adjusts advantage by a fixed percentage (e.g., ±25% at lambda=0.5),
+        # regardless of accuracy level. This prevents the collapse caused by fixed absolute
+        # injection overwhelming small advantages when accuracy is high.
         if not dry_run and pns_lambda > 0:
             step_mask = response_mask[b, s_start:s_end].float()
-            advantages[b, s_start:s_end] += pns_lambda * bonus * step_mask
+            step_adv_abs = advantages[b, s_start:s_end].abs()
+            advantages[b, s_start:s_end] += pns_lambda * bonus * step_adv_abs * step_mask
 
         pns_values.append(pns)
         pns_bonuses.append(bonus)
@@ -745,6 +793,8 @@ def compute_pns_for_batch(
             - max_prompt_length: int, max prompt length from data config
             - max_response_length: int, for generation length limit
             - pns_ablation_batch_size: int, max prompts per ablation generate call
+            - pns_pos_redundant_scale: float, scaling for redundant positive step penalty
+              (0.2 = gentle, 1.0 = original, 0.0 = no penalty)
 
     Returns:
         Tuple of (modified advantages, pns_metrics dict).
@@ -759,6 +809,7 @@ def compute_pns_for_batch(
     max_response_length = config.get("max_response_length", 4096)
     ablation_batch_size = config.get("pns_ablation_batch_size", 64)
     dry_run = config.get("pns_dry_run", False)
+    pos_redundant_scale = config.get("pns_pos_redundant_scale", 0.2)
 
     advantages = batch.batch["advantages"]
     response_mask = batch.batch["response_mask"]
@@ -889,6 +940,7 @@ def compute_pns_for_batch(
             tokenizer=tokenizer,
             compute_score_fn=compute_score_fn,
             num_rollouts=pns_num_rollouts,
+            pos_redundant_scale=pos_redundant_scale,
         )
         scored_candidates.extend(scored)
 

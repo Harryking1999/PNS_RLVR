@@ -7,7 +7,7 @@ set -euo pipefail
 cd /home/fuzhizhang.fzz/PNS_RLVR
 
 PYTHON="/workspace/anaconda3/envs/verl_fzz/bin/python"
-MERGE_DIR="/ssdwork/fuzhizhang/merged_models"
+MERGE_DIR="/home/fuzhizhang.fzz/model/merge_models"
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
 echo "======== Parallel Eval (2 GPUs) ========"
@@ -100,6 +100,6 @@ ${PYTHON} PNS_test/compare_pns_results.py
 echo ""
 echo "======== All Done! $(date) ========"
 echo "  Eval results: ${MERGE_DIR}/eval_results.json"
-echo "  PNS results:  /ssdwork/fuzhizhang/pns_results/"
+echo "  PNS results:  /home/fuzhizhang.fzz/model/merge_models/pns_results/"
 echo "  Eval logs:    ${MERGE_DIR}/eval_log_gpu{0,1}.txt"
 echo "  PNS logs:     ${MERGE_DIR}/pns_log_step{200,600,850}.txt"

@@ -10,8 +10,8 @@ set -euo pipefail
 cd /home/fuzhizhang.fzz/PNS_RLVR
 
 PYTHON="/workspace/anaconda3/envs/verl_fzz/bin/python"
-CKPT_ROOT="/ssdwork/fuzhizhang/ckpts/DAPO/RLVR-Qwen3-1.7B-DAPO-PNS"
-MERGE_DIR="/ssdwork/fuzhizhang/merged_models"
+CKPT_ROOT="/home/fuzhizhang.fzz/model/ckpts/DAPO/RLVR-Qwen3-1.7B-DAPO-PNS"
+MERGE_DIR="/home/fuzhizhang.fzz/model/merge_models"
 MODEL_PREFIX="DAPO-PNS"
 STEPS=(200 400 600 737 800 850)
 EVAL_GPU="${EVAL_GPU:-0}"
@@ -72,4 +72,4 @@ fi
 echo "======== Done! ========"
 echo "  Merged: ${MERGE_DIR}/"
 echo "  Eval:   ${EVAL_OUTPUT}"
-echo "  PNS:    /ssdwork/fuzhizhang/pns_results/"
+echo "  PNS:    /home/fuzhizhang.fzz/model/merge_models/pns_results/"

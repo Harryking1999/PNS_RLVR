@@ -155,6 +155,10 @@ class ActorConfig(BaseConfig):
     # Controls sub-batching to avoid OOM during ablation rollouts.
     pns_ablation_batch_size: int = 64
 
+    # PNS_RLVR: scaling for redundant positive step penalty.
+    # 0.2 = gentle, 1.0 = original, 0.0 = no penalty.
+    pns_pos_redundant_scale: float = 0.2
+
     # PNS_RLVR: dry-run mode. When True, PNS pipeline runs and logs all
     # metrics/details, but does NOT inject bonus into advantage.
     # Use this for DAPO control groups to observe PNS without affecting training.

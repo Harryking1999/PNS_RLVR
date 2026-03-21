@@ -5,7 +5,7 @@
 # 第一批 (GPU 0-3): 4 个模型并行
 # 第二批 (GPU 0-1): 2 个模型并行
 #
-# 日志在 /ssdwork/fuzhizhang/pns_results/{model_name}/run.log
+# 日志在 /home/fuzhizhang.fzz/model/merge_models/pns_results/{model_name}/run.log
 
 set -euo pipefail
 
@@ -25,7 +25,7 @@ run_model() {
     local GPU=$1
     local MODEL=$2
     local MODEL_NAME=$(basename "${MODEL}")
-    local LOG_DIR="/ssdwork/fuzhizhang/pns_results/${MODEL_NAME}"
+    local LOG_DIR="/home/fuzhizhang.fzz/model/merge_models/pns_results/${MODEL_NAME}"
     mkdir -p "${LOG_DIR}"
     local LOG="${LOG_DIR}/run.log"
 
@@ -84,7 +84,7 @@ echo "  ✅ 第二批全部完成!"
 echo ""
 echo "════════════════════════════════════════════════════════════"
 echo "  全部 6 个模型 PNS 估算完成! $(date)"
-echo "  结果目录: /ssdwork/fuzhizhang/pns_results/"
+echo "  结果目录: /home/fuzhizhang.fzz/model/merge_models/pns_results/"
 echo "════════════════════════════════════════════════════════════"
 echo ""
 echo "运行汇总对比:"

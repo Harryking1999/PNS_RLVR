@@ -336,6 +336,20 @@ class RayDAPOTrainer(RayPPOTrainer):
                     # PNS_RLVR: compute real PNS via counterfactual ablation rollouts
                     pns_enable = self.config.actor_rollout_ref.actor.get("pns_rlvr_enable", False)
                     if pns_enable and self._pns_boundary_lookup is not None:
+                        # --- Log pre-PNS advantage & raw accuracy for monitoring ---
+                        _pre_pns_adv = batch.batch["advantages"].clone()
+                        _resp_mask = batch.batch["response_mask"].bool()
+                        _valid_pre = torch.masked_select(_pre_pns_adv, _resp_mask)
+                        metrics["critic/advantages_pre_pns/mean"] = torch.mean(_valid_pre).detach().item()
+                        metrics["critic/advantages_pre_pns/max"] = torch.max(_valid_pre).detach().item()
+                        metrics["critic/advantages_pre_pns/min"] = torch.min(_valid_pre).detach().item()
+                        # Raw batch accuracy (fraction of correct responses, 0-1 scale)
+                        if "acc" in batch.non_tensor_batch:
+                            _acc_arr = np.array(batch.non_tensor_batch["acc"], dtype=np.float32)
+                            metrics["pns/raw_batch_acc"] = float(np.mean(_acc_arr))
+                            metrics["pns/n_correct_responses"] = int(np.sum(_acc_arr > 0))
+                            metrics["pns/n_total_responses"] = len(_acc_arr)
+
                         try:
                             with marked_timer("pns_ablation", timing_raw, "magenta"):
                                 actor_cfg = self.config.actor_rollout_ref.actor
@@ -356,6 +370,9 @@ class RayDAPOTrainer(RayPPOTrainer):
                                     ),
                                     "pns_ablation_batch_size": int(
                                         actor_cfg.get("pns_ablation_batch_size", 64)
+                                    ),
+                                    "pns_pos_redundant_scale": float(
+                                        actor_cfg.get("pns_pos_redundant_scale", 0.2)
                                     ),
                                 }
 
@@ -383,6 +400,14 @@ class RayDAPOTrainer(RayPPOTrainer):
                                 )
                                 batch.batch["advantages"] = advantages
                                 metrics.update(pns_metrics)
+
+                                # --- Log post-PNS advantage delta ---
+                                _valid_post = torch.masked_select(advantages, _resp_mask)
+                                metrics["critic/advantages_post_pns/mean"] = torch.mean(_valid_post).detach().item()
+                                metrics["pns/advantage_delta/mean"] = (
+                                    torch.mean(_valid_post).detach().item()
+                                    - torch.mean(_valid_pre).detach().item()
+                                )
                         except Exception as e:
                             import traceback
                             print(f"[PNS] WARNING: PNS computation failed, skipping this step. "

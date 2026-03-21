@@ -12,8 +12,8 @@ export PYTHONIOENCODING=UTF-8
 export TOKENIZERS_PARALLELISM=false
 export VLLM_WORKER_MULTIPROC_METHOD=spawn
 
-MERGED_DIR="/ssdwork/fuzhizhang/merged_models"
-OUTPUT_BASE="/ssdwork/fuzhizhang/pns_results/training_dynamic"
+MERGED_DIR="/home/fuzhizhang.fzz/model/merge_models"
+OUTPUT_BASE="/home/fuzhizhang.fzz/model/merge_models/pns_results/training_dynamic"
 PYTHON="/workspace/anaconda3/envs/verl_fzz/bin/python"
 SCRIPT="PNS_test/compute_pns.py"
 

@@ -30,17 +30,17 @@ Workflow (3 phases, each saves checkpoints for resumability):
 Usage:
     # Basic run
     CUDA_VISIBLE_DEVICES=0 python PNS_test/compute_pns.py \
-        --model /ssdwork/fuzhizhang/merged_models/Step-Forking-DAPO-step1600 \
+        --model /home/fuzhizhang.fzz/model/merge_models/Step-Forking-DAPO-step1600 \
         --num_problems 50 --num_rollouts 5
 
     # Test all steps (not just high-entropy), for correlation analysis
     CUDA_VISIBLE_DEVICES=0 python PNS_test/compute_pns.py \
-        --model /ssdwork/fuzhizhang/merged_models/Step-Forking-DAPO-step1600 \
+        --model /home/fuzhizhang.fzz/model/merge_models/Step-Forking-DAPO-step1600 \
         --test_all_steps --num_problems 30 --num_rollouts 5
 
     # Resume from a previous interrupted run
     CUDA_VISIBLE_DEVICES=0 python PNS_test/compute_pns.py \
-        --model /ssdwork/fuzhizhang/merged_models/Step-Forking-DAPO-step1600 \
+        --model /home/fuzhizhang.fzz/model/merge_models/Step-Forking-DAPO-step1600 \
         --resume
 """
 
@@ -1054,7 +1054,7 @@ def main():
 
     model_name = Path(args.model).name
     if args.output_dir is None:
-        args.output_dir = f"/ssdwork/fuzhizhang/pns_results/{model_name}"
+        args.output_dir = f"/home/fuzhizhang.fzz/model/merge_models/pns_results/{model_name}"
     os.makedirs(args.output_dir, exist_ok=True)
 
     # File paths (reverse mode uses separate files to avoid overwriting)

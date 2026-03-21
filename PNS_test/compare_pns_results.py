@@ -6,7 +6,7 @@ PNS Results Comparison Tool
 
 用法:
     python PNS_test/compare_pns_results.py
-    python PNS_test/compare_pns_results.py --results_dir /ssdwork/fuzhizhang/pns_results
+    python PNS_test/compare_pns_results.py --results_dir /home/fuzhizhang.fzz/model/merge_models/pns_results
 """
 
 import argparse
@@ -27,7 +27,7 @@ def load_analysis(results_dir, model_name):
 def main():
     parser = argparse.ArgumentParser(description="Compare PNS results across models")
     parser.add_argument("--results_dir", type=str,
-                        default="/ssdwork/fuzhizhang/pns_results",
+                        default="/home/fuzhizhang.fzz/model/merge_models/pns_results",
                         help="Directory containing per-model PNS results")
     args = parser.parse_args()
 

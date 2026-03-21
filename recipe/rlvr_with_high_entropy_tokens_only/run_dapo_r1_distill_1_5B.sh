@@ -63,7 +63,7 @@ train_prompt_mini_bsz=4
 # ====== Paths ======
 MODEL_PATH="/home/fuzhizhang.fzz/model/DeepSeek-R1-Distill-Qwen-1.5B"
 TRAIN_FILE="/home/fuzhizhang.fzz/data/math_combined_54k/math__combined_54.4k.parquet"
-CKPTS_DIR="/ssdwork/fuzhizhang/ckpts/${project_name}/${exp_name}"
+CKPTS_DIR="/home/fuzhizhang.fzz/model/ckpts/${project_name}/${exp_name}"
 VAL_AIME_FILE="/home/fuzhizhang.fzz/data/math__aime_repeated_32x_960.parquet"
 VAL_MATH500_FILE="/home/fuzhizhang.fzz/data/math__math_500.parquet"
 VAL_FILES="['${VAL_AIME_FILE}', '${VAL_MATH500_FILE}']"

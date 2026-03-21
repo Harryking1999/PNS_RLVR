@@ -7,7 +7,7 @@
 #   2. 对比运行: 在多个模型上分别运行, 对比 PNS 分布
 #   3. 全步骤分析: --test_all_steps 模式可以分析 entropy↔PNS 相关性
 #
-# 结果保存在 /ssdwork/fuzhizhang/pns_results/{model_name}/
+# 结果保存在 /home/fuzhizhang.fzz/model/merge_models/pns_results/{model_name}/
 #   - phase1_correct_responses.json  (正确回答)
 #   - phase2_entropy_steps.json      (熵 + 步骤分析)
 #   - phase3_ablation_rollouts.json  (消融 rollout 结果)
@@ -22,20 +22,20 @@ cd /home/fuzhizhang.fzz/PNS_RLVR
 # ──────────────────────────────────────────────────────────────
 
 # 基线模型
-# MODEL=/ssdwork/fuzhizhang/merged_models/Qwen3-1.7B-Base
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/Qwen3-1.7B-Base
 
 # DAPO 训练后模型 (不同 step)
-# MODEL=/ssdwork/fuzhizhang/merged_models/DAPO-step400
-# MODEL=/ssdwork/fuzhizhang/merged_models/DAPO-step800
-# MODEL=/ssdwork/fuzhizhang/merged_models/DAPO-step1600
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/DAPO-step400
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/DAPO-step800
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/DAPO-step1600
 
 # Forking DAPO (token-level 高熵选择)
-# MODEL=/ssdwork/fuzhizhang/merged_models/Forking-DAPO-step400
-# MODEL=/ssdwork/fuzhizhang/merged_models/Forking-DAPO-step800
-# MODEL=/ssdwork/fuzhizhang/merged_models/Forking-DAPO-step1600
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/Forking-DAPO-step400
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/Forking-DAPO-step800
+# MODEL=/home/fuzhizhang.fzz/model/merge_models/Forking-DAPO-step1600
 
 # Step Forking DAPO (step-level 高熵选择)
-MODEL=/ssdwork/fuzhizhang/merged_models/Step-Forking-DAPO-step1600
+MODEL=/home/fuzhizhang.fzz/model/merge_models/Step-Forking-DAPO-step1600
 
 # ──────────────────────────────────────────────────────────────
 # 运行模式选择
@@ -87,10 +87,10 @@ CUDA_VISIBLE_DEVICES=0 python PNS_test/compute_pns.py \
 # 在多个模型上分别计算 PNS, 用于对比不同训练方法
 # ──────────────────────────────────────────────────────────────
 # for MODEL in \
-#     /ssdwork/fuzhizhang/merged_models/Qwen3-1.7B-Base \
-#     /ssdwork/fuzhizhang/merged_models/DAPO-step1600 \
-#     /ssdwork/fuzhizhang/merged_models/Forking-DAPO-step1600 \
-#     /ssdwork/fuzhizhang/merged_models/Step-Forking-DAPO-step1600; do
+#     /home/fuzhizhang.fzz/model/merge_models/Qwen3-1.7B-Base \
+#     /home/fuzhizhang.fzz/model/merge_models/DAPO-step1600 \
+#     /home/fuzhizhang.fzz/model/merge_models/Forking-DAPO-step1600 \
+#     /home/fuzhizhang.fzz/model/merge_models/Step-Forking-DAPO-step1600; do
 #
 #     echo "========================================"
 #     echo "Running PNS for: $(basename ${MODEL})"

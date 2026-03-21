@@ -64,6 +64,7 @@ pns_lambda=0.5                 # PNS bonus 缩放因子
 pns_num_rollouts=5             # 每个干预任务的 rollout 数
 pns_step_ratio=0.5             # batch 中 PNS 测试步数 = B * pns_step_ratio
 pns_ablation_batch_size=64     # 每次 vLLM 调用的最大 ablation prompt 数
+pns_pos_redundant_scale=0.2    # 正样本冗余步骤惩罚缩放 (0.2=温和, 1.0=原版, 0.0=不惩罚)
 
 # ====== Batch sizes (针对4卡H100调整) ======
 train_prompt_bsz=16
@@ -74,7 +75,7 @@ train_prompt_mini_bsz=4
 # ====== Paths ======
 MODEL_PATH="/home/fuzhizhang.fzz/model/DeepSeek-R1-Distill-Qwen-1.5B"
 TRAIN_FILE="/home/fuzhizhang.fzz/data/math_combined_54k/math__combined_54.4k.parquet"
-CKPTS_DIR="/ssdwork/fuzhizhang/ckpts/${project_name}/${exp_name}"
+CKPTS_DIR="/home/fuzhizhang.fzz/model/ckpts/${project_name}/${exp_name}"
 VAL_AIME_FILE="/home/fuzhizhang.fzz/data/math__aime_repeated_32x_960.parquet"
 VAL_MATH500_FILE="/home/fuzhizhang.fzz/data/math__math_500.parquet"
 VAL_FILES="['${VAL_AIME_FILE}', '${VAL_MATH500_FILE}']"
@@ -157,12 +158,13 @@ python3 -m recipe.dapo.main_dapo \
     trainer.nnodes=1 \
     trainer.val_before_train=False \
     trainer.test_freq=-1 \
-    trainer.save_freq=200 \
-    trainer.total_epochs=1 \
+    trainer.save_freq=20 \
+    trainer.total_epochs=2 \
     trainer.default_local_dir="${CKPTS_DIR}" \
     trainer.resume_mode=auto \
     actor_rollout_ref.actor.pns_rlvr_enable=${pns_rlvr_enable} \
     actor_rollout_ref.actor.pns_lambda=${pns_lambda} \
     actor_rollout_ref.actor.pns_num_rollouts=${pns_num_rollouts} \
     actor_rollout_ref.actor.pns_step_ratio=${pns_step_ratio} \
-    actor_rollout_ref.actor.pns_ablation_batch_size=${pns_ablation_batch_size}
+    actor_rollout_ref.actor.pns_ablation_batch_size=${pns_ablation_batch_size} \
+    actor_rollout_ref.actor.pns_pos_redundant_scale=${pns_pos_redundant_scale}

@@ -9,10 +9,10 @@ Metrics:
 
 Usage:
     CUDA_VISIBLE_DEVICES=0 python tools/eval_benchmarks.py \
-        --models /ssdwork/fuzhizhang/merged_models/DAPO-step400 \
+        --models /home/fuzhizhang.fzz/model/merge_models/DAPO-step400 \
         --benchmarks aime24 aime25 math500 \
         --max_tokens 16384 \
-        --output /ssdwork/fuzhizhang/eval_results.json
+        --output /home/fuzhizhang.fzz/model/merge_models/eval_results.json
 """
 
 import argparse
@@ -267,7 +267,7 @@ def main():
     parser.add_argument("--benchmarks", nargs="+", default=["aime24", "aime25", "math500"],
                         choices=list(BENCHMARK_LOADERS.keys()))
     parser.add_argument("--max_tokens", type=int, default=16384)
-    parser.add_argument("--output", type=str, default="/ssdwork/fuzhizhang/eval_results.json")
+    parser.add_argument("--output", type=str, default="/home/fuzhizhang.fzz/model/merge_models/eval_results.json")
     args = parser.parse_args()
 
     all_results = load_existing_results(args.output)
